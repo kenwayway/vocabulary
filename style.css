@@ -1,5 +1,4 @@
-/* ====== 字体（可选）====== */
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=EB+Garamond:wght@400;500;600&family=IBM+Plex+Sans:wght@400;600&display=swap');
+/* ====== 字体（在 index.html 中通过 <link> 引入） ====== */
 
 :root{
   --bg:#0b0d10;

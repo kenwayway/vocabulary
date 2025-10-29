@@ -1,64 +1,216 @@
 // notion-worker.js
+const API_VERSION = "2022-06-28";
+const DEFAULT_FIELDS = {
+  word: { name: "Word", type: "title" },
+  pron: { name: "Pron", type: "rich_text" },
+  senses: { name: "Senses", type: "rich_text" },
+  ety: { name: "Etymology", type: "rich_text" },
+  same: { name: "Same", type: "multi_select" },
+  coll: { name: "Collocations", type: "multi_select" },
+  conf: { name: "Confusions", type: "multi_select" },
+  beans: { name: "Beans", type: "multi_select" }
+};
+
 export default {
-    async fetch(request, env, ctx) {
-      const url = new URL(request.url);
-      if (request.method === "OPTIONS") return cors(null); // 预检
-  
-      const db = url.searchParams.get("db");
-      if (!db) return cors(new Response(JSON.stringify({error:"missing db"}), {status:400}));
-  
-      // 支持分页抓取整个数据库
-      let hasMore = true, cursor = null, items = [];
-      while (hasMore) {
-        const body = { page_size: 100 };
-        if (cursor) body.start_cursor = cursor;
-  
-        const r = await fetch(`https://api.notion.com/v1/databases/${db}/query`, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${env.NOTION_TOKEN}`,
-            "Content-Type": "application/json",
-            "Notion-Version": "2022-06-28"
-          },
-          body: JSON.stringify(body)
-        });
-        if (!r.ok) return cors(new Response(await r.text(), {status:r.status}));
-  
-        const j = await r.json();
-        // 映射字段：按你数据库的属性名（见下方 NOTION_FIELDS）
-        for (const p of j.results) {
-          const props = p.properties || {};
-          const title = t => (t?.title||[]).map(x=>x.plain_text).join("");
-          const rich  = r => (r?.rich_text||[]).map(x=>x.plain_text).join("\n").trim();
-          const multi = m => (m?.multi_select||[]).map(x=>x.name);
-  
-          items.push({
-            notionId: p.id,
-            word: title(props.Word),     // 标题列
-            cn:   rich(props.CN),        // 中文释义（rich_text）
-            memo: rich(props.Memo),      // 自由笔记（rich_text）
-            syn:  multi(props.Syn),      // 同义词（multi_select）
-            col:  multi(props.Coll),     // 搭配（multi_select）
-            ex:   rich(props.Ex),        // 例句（rich_text，多行）
-            edited: p.last_edited_time
-          });
-        }
-        hasMore = j.has_more;
-        cursor = j.next_cursor;
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const originAllowList = parseAllowList(env.CORS_ALLOW_ORIGIN);
+    const requestOrigin = request.headers.get("Origin") || "";
+    const withCors = (res) => applyCors(res, originAllowList, requestOrigin);
+
+    if (request.method === "OPTIONS") {
+      if (!isOriginAllowed(requestOrigin, originAllowList)) {
+        return withCors(new Response("Forbidden", { status: 403 }));
       }
-      return cors(json(items));
+      return withCors(null);
+    }
+
+    if (!isOriginAllowed(requestOrigin, originAllowList)) {
+      return withCors(new Response("Forbidden", { status: 403 }));
+    }
+
+    const path = normalizePath(url.pathname);
+    if (!["/", "/sync"].includes(path)) {
+      return withCors(new Response("Not Found", { status: 404 }));
+    }
+    if (request.method !== "GET") {
+      return withCors(new Response("Method Not Allowed", { status: 405 }));
+    }
+
+    const dbAllowList = parseAllowList(env.NOTION_DB_ALLOWLIST);
+    const configuredDb = (env.NOTION_DB || "").trim();
+    if (configuredDb) dbAllowList.add(configuredDb);
+    const queryDb = (url.searchParams.get("db") || "").trim();
+    let dbId = configuredDb || queryDb;
+
+    if (!dbId) {
+      return withCors(json({ error: "missing db" }, 400));
+    }
+    if (dbAllowList.size && !dbAllowList.has("*") && !dbAllowList.has(dbId)) {
+      return withCors(json({ error: "db not allowed" }, 403));
+    }
+
+    try {
+      const fieldsConfig = parseFieldsConfig(env.NOTION_FIELDS_JSON);
+      const items = await pullDatabase({ dbId, token: env.NOTION_TOKEN, fieldsConfig });
+      return withCors(json(items));
+    } catch (err) {
+      console.error(err);
+      const status = Number.isInteger(err.statusCode) ? err.statusCode : 500;
+      return withCors(json({ error: err.message }, status));
+    }
+  }
+};
+
+async function pullDatabase({ dbId, token, fieldsConfig }) {
+  if (!token) {
+    const err = new Error("Missing NOTION_TOKEN");
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const items = [];
+  let hasMore = true;
+  let cursor = null;
+
+  while (hasMore) {
+    const body = { page_size: 100 };
+    if (cursor) body.start_cursor = cursor;
+
+    const res = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Notion-Version": API_VERSION
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      const err = new Error(`Notion responded with ${res.status}: ${text}`);
+      err.statusCode = res.status;
+      throw err;
+    }
+
+    const payload = await res.json();
+    for (const page of payload.results) {
+      const properties = page.properties || {};
+      items.push(mapPageToRecord(page, properties, fieldsConfig));
+    }
+
+    hasMore = payload.has_more;
+    cursor = payload.next_cursor;
+  }
+
+  return items;
+}
+
+function mapPageToRecord(page, props, fieldsConfig) {
+  const getField = (key) => {
+    const config = fieldsConfig[key];
+    if (!config) return null;
+
+    const property = props[config.name];
+    if (!property) return config.default ?? (config.type === "multi_select" ? [] : "");
+
+    switch (config.type) {
+      case "title":
+        return (property.title || []).map(toPlainText).join("").trim();
+      case "rich_text":
+        return (property.rich_text || []).map(toPlainText).join("\n").trim();
+      case "multi_select":
+        return (property.multi_select || []).map((x) => x.name);
+      default:
+        return config.default ?? "";
     }
   };
-  
-  function json(obj){ return new Response(JSON.stringify(obj), {headers:{"Content-Type":"application/json"}}); }
-  function cors(res){
-    const h = {
-      "Access-Control-Allow-Origin": "*",             // 需要可改为你的域名
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type"
-    };
-    if (!res) return new Response(null, {headers:h});
-    Object.entries(h).forEach(([k,v])=>res.headers.set(k,v));
-    return res;
+
+  return {
+    notionId: page.id,
+    edited: page.last_edited_time,
+    word: getField("word") || "",
+    pron: ensureArray(getField("pron")),
+    senses: ensureArray(getField("senses")),
+    ety: getField("ety") || "",
+    same: ensureArray(getField("same")),
+    coll: ensureArray(getField("coll")),
+    conf: ensureArray(getField("conf")),
+    beans: ensureArray(getField("beans"))
+  };
+}
+
+function ensureArray(value) {
+  if (Array.isArray(value)) return value;
+  if (!value) return [];
+  if (typeof value === "string") {
+    return value
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
-  
+  return [];
+}
+
+function toPlainText(block) {
+  return block?.plain_text ?? "";
+}
+
+function normalizePath(pathname) {
+  return pathname.replace(/\/+$/, "") || "/";
+}
+
+function parseFieldsConfig(jsonText) {
+  if (!jsonText) return DEFAULT_FIELDS;
+  try {
+    const parsed = JSON.parse(jsonText);
+    return { ...DEFAULT_FIELDS, ...parsed };
+  } catch (err) {
+    console.warn("Failed to parse NOTION_FIELDS_JSON, using default mapping.", err);
+    return DEFAULT_FIELDS;
+  }
+}
+
+function parseAllowList(raw) {
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+}
+
+function isOriginAllowed(origin, allowList) {
+  if (!origin || allowList.size === 0 || allowList.has("*")) return true;
+  return allowList.has(origin);
+}
+
+function resolveCorsOrigin(allowList, origin) {
+  if (allowList.size === 0 || allowList.has("*")) return "*";
+  if (origin && allowList.has(origin)) return origin;
+  return allowList.values().next().value;
+}
+
+function applyCors(res, allowList, origin) {
+  const headers = {
+    "Access-Control-Allow-Methods": "GET,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type"
+  };
+  const allowOrigin = resolveCorsOrigin(allowList, origin);
+  headers["Access-Control-Allow-Origin"] = allowOrigin;
+  if (allowList.size && !allowList.has("*")) {
+    headers["Vary"] = "Origin";
+  }
+  const response = res ?? new Response(null, { status: 204 });
+  Object.entries(headers).forEach(([key, value]) => response.headers.set(key, value));
+  return response;
+}
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+}

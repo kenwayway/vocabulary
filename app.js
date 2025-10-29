@@ -1,17 +1,25 @@
 "use strict";
 
-/** ========= 配置：你的 Notion Worker 根地址（后端已配置 DB） ========= */
+/** ========= Notion sync configuration ========= */
 const NOTION_ENDPOINT = "https://notion2json.kenway27a.workers.dev/";
+const NOTION_DB_ID = "";
+const NOTION_SYNC_TIMEOUT_MS = 12000;
+const NOTION_SYNC_MAX_RETRIES = 2;
+const NOTION_SYNC_RETRY_BASE_DELAY_MS = 600;
+const NOTION_AUTO_RETRY_DELAY_MS = 60000;
 
-/** ========= 基础工具 ========= */
+/** ========= Storage & scheduling ========= */
 const STORE_KEY = "wordcards.v1";
-const INTERVALS = { 1:1, 2:2, 3:4, 4:7, 5:15 }; // 天
+const INTERVALS = { 1: 1, 2: 2, 3: 4, 4: 7, 5: 15 }; // days
+let storeCache = null;
+let notionRetryTimer = null;
 const clampBox = b => Math.max(1, Math.min(5, b));
 const todayDateOnly = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
 const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); d.setHours(0,0,0,0); return d; };
 const fmtDate = (d) => new Date(d).toISOString().slice(0,10);
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s||"").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 /** ========= 背面只读字段（与你的 Notion 列对应） ========= */
 const DEFAULT_WIDGETS = [
@@ -25,14 +33,21 @@ const DEFAULT_WIDGETS = [
 ];
 
 /** ========= 本地数据（仅存排期与统计） ========= */
-function loadAll(){
+function loadAll(force=false){
+  if (!force && Array.isArray(storeCache)) return storeCache;
   try{
     const raw = localStorage.getItem(STORE_KEY);
     const arr = raw ? JSON.parse(raw) : [];
-    return Array.isArray(arr) ? arr : [];
-  }catch{ return []; }
+    storeCache = Array.isArray(arr) ? arr : [];
+  }catch{
+    storeCache = [];
+  }
+  return storeCache;
 }
-function saveAll(list){ localStorage.setItem(STORE_KEY, JSON.stringify(list)); }
+function saveAll(list){
+  storeCache = Array.isArray(list) ? list : [];
+  localStorage.setItem(STORE_KEY, JSON.stringify(storeCache));
+}
 
 function getDueList(){
   const all = loadAll();
@@ -43,10 +58,15 @@ function getDueList(){
 }
 function stats(){
   const all = loadAll();
-  const due = getDueList().length;
+  const todayISO = fmtDate(todayDateOnly());
+  const due = all.filter(x => (x.nextDueISO||"") <= todayISO).length;
   const ok = all.reduce((s,x)=>s+(x.success||0),0);
   const bad = all.reduce((s,x)=>s+(x.fail||0),0);
-  return { total: all.length, due, ok, bad, recent: all.slice(0,200) };
+  const recent = all
+    .slice()
+    .sort((a,b) => (b.createdAtISO||"").localeCompare(a.createdAtISO||""))
+    .slice(0,200);
+  return { total: all.length, due, ok, bad, recent };
 }
 
 /** ========= 例句生成（本地） ========= */
@@ -84,35 +104,97 @@ function genExampleLocal(word){
 function notionStatus(msg){ const el = $("notionStatus"); if(el) el.textContent = msg; }
 function nlSplit(v){ if (Array.isArray(v)) return v; return String(v||"").split("\n").map(s=>s.trim()).filter(Boolean); }
 
+function scheduleNotionRetry(delay = NOTION_AUTO_RETRY_DELAY_MS){
+  if (notionRetryTimer) clearTimeout(notionRetryTimer);
+  notionRetryTimer = setTimeout(() => {
+    notionRetryTimer = null;
+    autoSyncFromNotion();
+  }, delay);
+}
+
+function clearNotionRetry(){
+  if (notionRetryTimer){
+    clearTimeout(notionRetryTimer);
+    notionRetryTimer = null;
+  }
+}
+
+async function fetchNotionRecords(url, onRetry){
+  let attempt = 0;
+  let lastError = null;
+  const totalAttempts = NOTION_SYNC_MAX_RETRIES + 1;
+  while (attempt < totalAttempts){
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), NOTION_SYNC_TIMEOUT_MS) : null;
+    try{
+      const res = await fetch(url.toString(), { method:"GET", signal: controller?.signal });
+      if (timer) clearTimeout(timer);
+      if(!res.ok){
+        const text = await res.text();
+        throw new Error(`Worker 返回错误：${res.status} ${text}`);
+      }
+      return await res.json();
+    }catch(err){
+      if (timer) clearTimeout(timer);
+      if (err && err.name === "AbortError") {
+        err = new Error("请求超时");
+      }
+      lastError = err;
+      attempt++;
+      if (attempt >= totalAttempts) throw lastError;
+      if (typeof onRetry === "function"){
+        onRetry({
+          attempt,
+          nextAttempt: attempt + 1,
+          maxAttempts: totalAttempts,
+          error: err
+        });
+      }
+      const delay = NOTION_SYNC_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
 async function autoSyncFromNotion(){
   if(!NOTION_ENDPOINT){
     notionStatus("未配置 NOTION_ENDPOINT。");
     return;
   }
+  if (typeof navigator !== "undefined" && navigator.onLine === false){
+    notionStatus(`当前处于离线状态，将在 ${Math.round(NOTION_AUTO_RETRY_DELAY_MS/1000)} 秒后自动重试。`);
+    scheduleNotionRetry();
+    return;
+  }
   try{
     notionStatus("正在从 Notion 拉取…");
-    const url = `${NOTION_ENDPOINT.replace(/\/$/,"")}/sync`;
-    const res = await fetch(url, { method:"GET" });
-    if(!res.ok){
-      const t = await res.text();
-      throw new Error(`Worker 返回错误：${res.status} ${t}`);
-    }
-    const arr = await res.json();
+    const base = NOTION_ENDPOINT.replace(/\/$/,"");
+    const url = new URL(`${base}/sync`);
+    if (NOTION_DB_ID) url.searchParams.set("db", NOTION_DB_ID);
+    const arr = await fetchNotionRecords(url, ({ nextAttempt, maxAttempts, error }) => {
+      notionStatus(`同步失败：${error.message}，准备第 ${Math.min(nextAttempt, maxAttempts)} 次重试…`);
+    });
     if(!Array.isArray(arr)) throw new Error("Worker 返回的不是数组。");
 
     let all = loadAll(); let created=0, updated=0;
     for(const it of arr){
       if(!it || !it.word) continue;
+      const canonicalWord = String(it.word).trim();
+      if (!canonicalWord) continue;
+      const normalizedWord = canonicalWord.toLowerCase();
       let idx = all.findIndex(r => r.notionId === it.notionId);
-      if (idx < 0) idx = all.findIndex(r => !r.notionId && r.word === it.word);
+      if (idx < 0) {
+        idx = all.findIndex(r => !r.notionId && String(r.word||"").trim().toLowerCase() === normalizedWord);
+      }
 
-    const mappedMeta = {
-        pron:  nlSplit(it.pron),
-        senses:nlSplit(it.senses),
-        ety:   it.ety || "",
-        same:  nlSplit(it.same),
-        coll:  nlSplit(it.coll),
-        conf:  nlSplit(it.conf),
+      const mappedMeta = {
+        pron: nlSplit(it.pron),
+        senses: nlSplit(it.senses),
+        ety: it.ety || "",
+        same: nlSplit(it.same),
+        coll: nlSplit(it.coll),
+        conf: nlSplit(it.conf),
         beans: nlSplit(it.beans)
       };
 
@@ -120,7 +202,7 @@ async function autoSyncFromNotion(){
         const cur = all[idx];
         all[idx] = {
           ...cur,
-          word: it.word || cur.word,
+          word: canonicalWord || cur.word,
           meta: { ...(cur.meta||{}), ...mappedMeta },
           notionId: it.notionId,
           notionEdited: it.edited
@@ -130,7 +212,7 @@ async function autoSyncFromNotion(){
         const now = new Date();
         all.unshift({
           id: (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + Math.random()),
-          word: it.word,
+          word: canonicalWord,
           note: "",
           box: 1,
           nextDueISO: fmtDate(todayDateOnly()),
@@ -147,9 +229,11 @@ async function autoSyncFromNotion(){
     refreshStats();
     const ts = new Date().toLocaleString();
     notionStatus(`同步完成：新增 ${created}，更新 ${updated}（${ts}）`);
+    clearNotionRetry();
   }catch(err){
     console.error(err);
-    notionStatus("同步失败：" + err.message);
+    notionStatus(`同步失败：${err.message}（将在 ${Math.round(NOTION_AUTO_RETRY_DELAY_MS/1000)} 秒后自动重试）`);
+    scheduleNotionRetry();
   }
 }
 
