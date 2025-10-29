@@ -272,7 +272,7 @@ function refreshStats(){
 }
 
 /** ========= 报纸版沉浸模式（正面上浮 + 背面下拉充满） ========= */
-let session = { list: [], idx: 0, current: null, showingBack:false };
+let session = { list: [], idx: 0, current: null, detailsOpen:false };
 
 function startImmersive(){
   const due = getDueList();
@@ -281,7 +281,7 @@ function startImmersive(){
     alert("还没有可复习的词。请确认 Notion 已同步成功。");
     return;
   }
-  session = { list, idx:0, current:list[0], showingBack:false };
+  session = { list, idx:0, current:list[0], detailsOpen:false };
   $("immersive").hidden = false;
   renderImmersiveCard();
   updateImProgress();
@@ -298,124 +298,200 @@ function renderImmersiveCard(){
   const today = new Date();
   const vol = (item.box||1);
   const due = esc(item.nextDueISO || "-");
+  const todayStamp = esc(today.toLocaleDateString());
+  const dispatchNo = esc(String(item.id || "").slice(-4).toUpperCase() || "XXXX");
+  const serialNo = esc(String(item.id || "").slice(-6) || "000000");
 
   wrap.innerHTML = `
-    <div class="card ${session.showingBack ? "state-back sheet-open" : "state-front"}" id="imCard">
+    <div class="card" id="imCard">
+      <article class="paper telegram-sheet card-front">
+        <header class="telegram-masthead">
+          <div class="telegram-office">UNITED CABLE SERVICE</div>
+          <div class="telegram-meta">
+            <span>${todayStamp}</span>
+            <span>DISPATCH ${dispatchNo}</span>
+          </div>
+        </header>
+        <div class="double-rule double-rule-top"></div>
+        <h1 class="headline telegram-head">${esc(item.word).toUpperCase()}</h1>
+        <div class="double-rule double-rule-bottom"></div>
+        <p class="telegram-lede">${esc(eg)}</p>
+        <footer class="telegram-footer">
+          <span class="footer-tag">BOX ${vol}</span>
+          <span class="footer-tag">DUE ${due}</span>
+          <span class="footer-tag">FILE ${serialNo}</span>
+        </footer>
+        <div class="postal-stamp" aria-hidden="true">
+          <span class="stamp-top">POSTE</span>
+          <span class="stamp-mid">${due}</span>
+          <span class="stamp-btm">${today.getFullYear()}</span>
+        </div>
+        <aside class="margin-note note-left" aria-hidden="true">REVIEW ${due}</aside>
+        <aside class="margin-note note-right" aria-hidden="true">BOX ${vol}</aside>
+      </article>
 
-      <!-- 正面：报头 + 大标题 + 例句 + 版次章（保持原样，打开后上浮收缩） -->
-      <div class="panel front-panel">
-        <article class="paper">
-          <div class="masthead">
-            <div class="mast-left">Wordcards Gazette</div>
-            <div class="mast-right">
-              <span>${today.toLocaleDateString()}</span>
-              <span>Vol. ${vol}</span>
-            </div>
-          </div>
-          <h1 class="headline sc ink">${esc(item.word)}</h1>
-          <div class="subhead">${esc(eg)}</div>
-          <div class="seals">
-            <span class="seal">BOX ${vol}</span>
-            <span class="seal">DUE ${due}</span>
-          </div>
-          <div class="footer-rule meta-line" style="margin-top:12px;">
-            <span>Press: Local • Print No.${String(item.id).slice(-6)}</span>
-          </div>
-        </article>
-      </div>
-
-      <!-- 背面：下拉占满纵向，主体滚动 -->
-      <div class="panel back-panel">
-        <article class="paper">
-          <div class="masthead" style="margin-bottom:6px;">
-            <div class="mast-left">Lexicography & Natural History</div>
-            <div class="mast-right"><span>Filed: ${today.toLocaleDateString()}</span></div>
-          </div>
-          <div class="paper-body" id="paperBody">
-            ${renderBackWidgetsAsArticles(item)}
-          </div>
-        </article>
-      </div>
-
-    </div>
+      <article class="card-details paper broadsheet" id="cardDetails">
+        <header class="broadsheet-masthead">
+          <div class="broadsheet-title">LEXICAL BULLETIN · SECTION ${vol}</div>
+          <div class="broadsheet-meta">Filed ${todayStamp}</div>
+        </header>
+        <div class="broadsheet-body" id="detailsBody">
+          ${renderBackWidgetsAsArticles(item)}
+        </div>
+        <footer class="broadsheet-footer">
+          <span>Compiled for dispatch ${dispatchNo}</span>
+          <span>${serialNo}</span>
+        </footer>
+        <div class="marginalia marginalia-left" aria-hidden="true">CLASSIFIED</div>
+      <div class="marginalia marginalia-right" aria-hidden="true">ARCHIVE</div>
+    </article>
+  </div>
   `;
 
-  // 容器切换对齐方式（让卡片上浮到顶部）
-  const cw = document.querySelector(".im-cardwrap");
-  if (cw){
-    cw.classList.toggle("sheet-open", session.showingBack);
+  const cardEl = $("imCard");
+  if (cardEl){
+    const details = $("cardDetails");
+    if (details){
+      if (session.detailsOpen){
+        details.classList.add("is-open");
+        details.style.height = details.scrollHeight + "px";
+        requestAnimationFrame(()=>{ details.style.height = "auto"; });
+      }else{
+        details.classList.remove("is-open");
+        details.style.height = "0px";
+      }
+    }
+    cardEl.onclick = (e)=>{
+      // 避免和按钮冲突
+      if (e.target.closest(".card-details")) return toggleDetails();
+      if (e.target.closest(".im-controls")) return;
+      toggleDetails();
+    };
   }
-
-  $("imCard").onclick = ()=> $("imFlip").click();
 }
 
 function renderBackWidgetsAsArticles(rec){
   const m = rec.meta || {};
-  const blocks = DEFAULT_WIDGETS.map(w => {
+  let sectionIndex = 0;
+  const sections = [];
+
+  DEFAULT_WIDGETS.forEach(w => {
     const val = m[w.key];
     const label = esc(w.label);
+    let content = "";
+    let hasContent = false;
 
     if (w.type === "text"){
-      const txt = (val && String(val).trim()) ? esc(val) : "—";
-      return `
-        <section class="article">
-          <div class="label">${label}</div>
-          <div class="text">${txt.replace(/\n/g,"<br>")}</div>
-        </section>
-      `;
-    }
-
-    if (w.type === "tags"){
+      const txt = (val && String(val).trim()) ? esc(val).replace(/\n/g,"<br>") : "";
+      if (txt){
+        hasContent = true;
+        content = `<p class="broadsheet-text">${txt}</p>`;
+      }
+    }else if (w.type === "tags"){
       const arr = Array.isArray(val)? val : nlSplit(val);
-      const content = arr.length
-        ? arr.map(t=>`<span class="pill">${esc(t)}</span>`).join("")
-        : "—";
-      const extra = (w.key === "conf") ? " warning" : "";
-      return `
-        <section class="article${extra}">
-          <div class="label">${label}</div>
-          <div class="tags">${content}</div>
-        </section>
-      `;
-    }
-
-    if (w.type === "list"){
+      if (arr.length){
+        hasContent = true;
+        content = `<div class="tag-ribbon">${arr.map(t=>`<span class="franked-tag">${esc(t)}</span>`).join("")}</div>`;
+      }
+      if (!hasContent && w.key === "conf"){
+        // show empty caution area for conflicts to highlight absence
+        content = `<div class="tag-ribbon muted">无记录</div>`;
+        hasContent = true;
+      }
+    }else if (w.type === "list"){
       const arr = Array.isArray(val)? val : nlSplit(val);
-      const content = arr.length
-        ? arr.map(t=>`<span class="capsule">${esc(t)}</span>`).join("")
-        : "—";
-      return `
-        <section class="article">
-          <div class="label">${label}</div>
-          <div class="text">${content}</div>
-        </section>
-      `;
-    }
-
-    if (w.type === "senses-ol"){
+      if (arr.length){
+        hasContent = true;
+        content = `<ul class="ticker-list">${arr.map(t=>`<li>${esc(t)}</li>`).join("")}</ul>`;
+      }
+    }else if (w.type === "senses-ol"){
       const arr = Array.isArray(val)? val : nlSplit(val);
-      const content = arr.length
-        ? `<ol class="news-ol">${arr.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>`
-        : "—";
-      return `
-        <section class="article">
-          <div class="label">${label}</div>
-          <div class="text">${content}</div>
-        </section>
-      `;
+      if (arr.length){
+        hasContent = true;
+        const [lead, ...rest] = arr;
+        const quote = `<blockquote class="pull-quote"><span class="quote-mark">❝</span>${esc(lead)}<span class="quote-mark">❞</span></blockquote>`;
+        const list = rest.length
+          ? `<ol class="bulletin-ol">${rest.map((s,i)=>`<li><span class="ol-index">${String(i+1).padStart(2,"0")}</span>${esc(s)}</li>`).join("")}</ol>`
+          : "";
+        content = `${quote}${list}`;
+      }
     }
 
-    return "";
-  }).join("");
+    if (!hasContent) return;
+    sectionIndex++;
+    const sectionNo = String(sectionIndex).padStart(2,"0");
+    const cautionClass = w.key === "conf" ? " caution" : "";
+    sections.push(`
+      <section class="bulletin-section${cautionClass}" data-key="${esc(w.key)}">
+        <header class="section-head">
+          <span class="section-number">${sectionNo}</span>
+          <span class="section-label">${label}</span>
+          <span class="section-rule" aria-hidden="true"></span>
+        </header>
+        <div class="section-body">${content}</div>
+      </section>
+    `);
+  });
 
-  return blocks;
+  return sections.join("");
 }
 
-/** ========= 进度/排期 ========= */
+function toggleDetails(force){
+  const next = typeof force === "boolean" ? force : !session.detailsOpen;
+  const card = $("imCard");
+  if (!card) return;
+  const details = card.querySelector(".card-details");
+  if (!details) return;
+
+  if (next === session.detailsOpen){
+    return;
+  }
+
+  if (next){
+    details.style.transition = "none";
+    details.style.height = "auto";
+    const target = details.scrollHeight;
+    details.style.height = "0px";
+    // 强制回流，确保起点为 0
+    details.offsetHeight;
+    details.style.transition = "";
+    details.classList.add("is-open");
+    details.style.height = target + "px";
+    session.detailsOpen = true;
+
+    const onEnd = (e)=>{
+      if(e.propertyName !== "height") return;
+      details.removeEventListener("transitionend", onEnd);
+      if (session.detailsOpen){
+        details.style.height = "auto";
+      }
+    };
+    details.addEventListener("transitionend", onEnd);
+  }else{
+    const current = details.scrollHeight;
+    details.style.height = current + "px";
+    details.offsetHeight;
+    details.style.height = "0px";
+    session.detailsOpen = false;
+    details.classList.remove("is-open");
+
+    const onEnd = (e)=>{
+      if(e.propertyName !== "height") return;
+      details.removeEventListener("transitionend", onEnd);
+      if (!session.detailsOpen){
+        details.style.height = "0px";
+      }
+    };
+    details.addEventListener("transitionend", onEnd);
+  }
+}
+
+/** ========= 原有进度/排期逻辑 ========= */
 function updateImProgress(){
   const p = Math.round((session.idx) / session.list.length * 100);
   $("imBar").style.width = Math.min(100, p) + "%";
 }
+
 function nextImItem(){
   session.idx++;
   if(session.idx >= session.list.length){
@@ -424,7 +500,7 @@ function nextImItem(){
     return;
   }
   session.current = session.list[session.idx];
-  session.showingBack = false;
+  session.detailsOpen = false;
   renderImmersiveCard();
   updateImProgress();
 }
@@ -450,14 +526,17 @@ function gradeIm(isGood){
 }
 function exitImmersive(){
   $("immersive").hidden = true;
-  // 退出时清理 sheet-open
-  const cw = document.querySelector(".im-cardwrap");
-  if (cw){ cw.classList.remove("sheet-open"); }
+  session.detailsOpen = false;
   refreshStats();
 }
 
 /** ========= 事件绑定 ========= */
 window.addEventListener("DOMContentLoaded", () => {
+  const mastDate = $("mastDate");
+  if (mastDate){
+    const formatter = new Intl.DateTimeFormat("zh-Hans", { year: "numeric", month: "short", day: "numeric" });
+    mastDate.textContent = formatter.format(new Date());
+  }
   // 自动从 Notion 拉取
   autoSyncFromNotion();
 
@@ -496,57 +575,8 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // 沉浸快捷键
   $("imExit").onclick = exitImmersive;
-  $("imFlip").onclick = ()=>{
-    const card = $("imCard");
-    if(!card) return;
-  
-    const container = document.querySelector(".im-cardwrap");
-    const isBackNow = !!card.classList.contains("state-back");
-  
-    // —— 打开（进入下拉背面）——
-    if(!isBackNow){
-      session.showingBack = true;
-      card.classList.add("state-back","sheet-open");
-      card.classList.remove("state-front","closing");
-      if (container) container.classList.add("sheet-open");
-      const body = card.querySelector(".back-panel .paper-body");
-      if (body){ body.scrollTop = 0; }
-      return;
-    }
-  
-    // —— 关闭（先折叠背面，再切换类，避免重影）——
-    session.showingBack = false;
-    const body = card.querySelector(".back-panel .paper-body");
-    if(!body){
-      // 兜底：没有找到正文容器就直接关
-      card.classList.remove("state-back","sheet-open","closing");
-      card.classList.add("state-front");
-      if (container) container.classList.remove("sheet-open");
-      return;
-    }
-  
-    // 1) 进入 closing 状态，准备做高度动画
-    card.classList.add("closing");
-    // 先把 max-height 设为当前实际高度（像素），保证从“实际高度 → 0”的动画流畅
-    body.style.maxHeight = body.scrollHeight + "px";
-    // 触发一次回流让上面数值生效
-    void body.offsetHeight;
-    // 再把 max-height 设为 0，启动收合动画（CSS 中会配合 opacity 轻淡出）
-    body.style.maxHeight = "0px";
-  
-    // 2) 收合完再切换类，彻底回到正面
-    const onEnd = (e)=>{
-      if(e.propertyName !== "max-height") return;
-      body.removeEventListener("transitionend", onEnd);
-  
-      // 清理内联样式与状态
-      body.style.maxHeight = "";
-      card.classList.remove("closing","sheet-open","state-back");
-      card.classList.add("state-front");
-      if (container) container.classList.remove("sheet-open");
-    };
-    body.addEventListener("transitionend", onEnd);
-  };
+  const handleToggle = ()=> toggleDetails();
+  $("imFlip").onclick = handleToggle;
   
   $("imGood").onclick = ()=> gradeIm(true);
   $("imBad").onclick = ()=> gradeIm(false);
@@ -555,7 +585,7 @@ window.addEventListener("DOMContentLoaded", () => {
     const activeTag = (document.activeElement && document.activeElement.tagName) || "";
     if (["INPUT","TEXTAREA"].includes(activeTag)) return;
     if (im && !im.hidden){
-      if (e.code==="Space"){ e.preventDefault(); $("imFlip").click(); }
+      if (e.code==="Space"){ e.preventDefault(); handleToggle(); }
       if (e.key==="j" || e.key==="J"){ e.preventDefault(); $("imBad").click(); }
       if (e.key==="k" || e.key==="K"){ e.preventDefault(); $("imGood").click(); }
       if (e.key==="Escape"){ e.preventDefault(); $("imExit").click(); }

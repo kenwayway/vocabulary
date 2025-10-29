@@ -6,46 +6,63 @@
   <title>记单词 · 沉浸模式（Notion 驱动）</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=EB+Garamond:wght@400;500;600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=EB+Garamond:wght@400;500;600&family=IBM+Plex+Sans:wght@400;600&family=Special+Elite&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-<header><h1>记单词 · 沉浸模式（Notion）</h1></header>
-
-<main>
-  <!-- 左侧：控制台（无新增/无编辑/自动同步） -->
-  <section>
-    <h2>复习</h2>
-    <div class="row">
-      <button id="immStartBtn" class="btn primary">沉浸复习</button>
-      <span class="pill" id="duePill">今日到期：0</span>
-    </div>
-
-    <h2 style="margin-top:16px;">状态</h2>
-    <div class="stats" id="stats">
-      <div class="stat"><div class="k">总词数</div><div class="v" id="totalV">0</div></div>
-      <div class="stat"><div class="k">今日到期</div><div class="v" id="dueV">0</div></div>
-      <div class="stat"><div class="k">正确 / 错误</div><div class="v"><span id="okV">0</span> / <span id="badV">0</span></div></div>
-    </div>
-    <div class="field" style="margin-top:10px;">
-      <label style="color:var(--muted); font-size:12px;">Notion 同步</label>
-      <div id="notionStatus" style="font-size:13px; color:var(--muted);">等待自动同步…</div>
-    </div>
-
-    <h2 style="margin-top:16px;">导入 / 导出</h2>
-    <div class="row">
-      <button id="exportBtn" class="btn ghost">导出 JSON</button>
-      <label class="btn ghost" for="importFile">导入 JSON</label>
-      <input id="importFile" type="file" accept="application/json" style="display:none;" />
-    </div>
+<div class="page-shell">
+  <header class="telegraph-bar" aria-label="电报抬头">
+    <span class="telegraph-brand">WORDCARD DISPATCH</span>
+    <span class="telegraph-meta">WIRE SERVICE · IMMERSIVE REVISION DESK · CIRCA 1946</span>
+    <span class="telegraph-stamp">SYNC LINE</span>
+  </header>
+  <section class="page-masthead" aria-label="报纸旗头">
+    <h1 class="page-title">THE DAILY LEXICON</h1>
+    <div class="page-sub">“Hand-set vocabulary briefs with automatic Notion dispatch.”</div>
+    <div class="page-dateline">STUDIO DESK · <span id="mastDate"></span> · VOL. IMMERSION</div>
   </section>
 
-  <!-- 右侧：词库（最近添加），只读；点击跳转 Notion 原条目 -->
-  <section>
-    <h2>词库（最近添加）</h2>
-    <div class="list" id="recentList"></div>
-  </section>
-</main>
+  <main class="page-body">
+    <!-- 左侧：控制台 -->
+    <section class="section-card">
+      <h2>复习任务</h2>
+      <div class="row">
+        <button id="immStartBtn" class="btn primary">沉浸复习</button>
+        <span class="pill" id="duePill">今日到期：0</span>
+      </div>
+
+      <h2 style="margin-top:18px;">今日概览</h2>
+      <div class="stats" id="stats">
+        <div class="stat"><div class="k">总词数</div><div class="v" id="totalV">0</div></div>
+        <div class="stat"><div class="k">今日到期</div><div class="v" id="dueV">0</div></div>
+        <div class="stat"><div class="k">正确 / 错误</div><div class="v"><span id="okV">0</span> / <span id="badV">0</span></div></div>
+      </div>
+
+      <div class="field" style="margin-top:18px;">
+        <label style="color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.24em;">Notion 同步</label>
+        <div id="notionStatus" style="font-size:13px; color:var(--muted); font-family:'IBM Plex Sans',sans-serif;">等待自动同步…</div>
+      </div>
+
+      <h2 style="margin-top:18px;">备份 & 迁移</h2>
+      <div class="row">
+        <button id="exportBtn" class="btn ghost">导出 JSON</button>
+        <label class="btn ghost" for="importFile">导入 JSON</label>
+        <input id="importFile" type="file" accept="application/json" style="display:none;" />
+      </div>
+    </section>
+
+    <!-- 右侧：词库 -->
+    <section class="section-card">
+      <h2>最近入档</h2>
+      <div class="list" id="recentList"></div>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <div>纯前端排程 · 本地记忆卡片 · 联动 Notion 只读数据</div>
+    <div>Immersive Review Desk · Wordcard Dispatch</div>
+  </footer>
+</div>
 
 <!-- 沉浸式复习层（背面只读） -->
 <div id="immersive" hidden>
@@ -58,15 +75,11 @@
     <div class="im-cardwrap" id="imWrap"><!-- 动态注入卡片 --></div>
     <div class="im-controls">
       <button id="imBad" class="btn bad">不知道 (J)</button>
-      <button id="imFlip" class="btn ghost">翻面 (空格)</button>
+      <button id="imFlip" class="btn ghost">释义 (空格)</button>
       <button id="imGood" class="btn good">知道 (K)</button>
     </div>
   </div>
 </div>
-
-<footer style="padding:12px 16px; color:var(--muted); text-align:center;">
-  纯前端 · 本地排期 · 背面只读引用 Notion · 打开页面自动同步
-</footer>
 
 <script src="app.js" defer></script>
 </body>
