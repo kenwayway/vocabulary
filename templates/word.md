@@ -21,23 +21,8 @@ srs:
 
 —
 
-## Etymology
-<!-- Roots, affixes, the story of how the word got here. -->
+<!-- MORE: Etymology · Word family · Synonyms & nuance · Collocations ·
+     My sentences · Notes
 
-## Word family
-<!-- Related forms: adjective, adverb, verb... -->
-
-## Synonyms & nuance
-<!-- Not just a list: say how each one differs. -->
--
-
-## Collocations
-<!-- The words it habitually travels with. -->
--
-
-## My sentences
-<!-- Sentences you wrote yourself. Add to this every time you review. -->
--
-
-## Notes
-<!-- Memory hooks, confusions, anything else. -->
+     Add any of these as a '## Heading' when you want the depth. To start a
+     note with all of them laid out: vocab.py new <word> --full -->

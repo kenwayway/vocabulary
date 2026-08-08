@@ -127,6 +127,103 @@ export function fillInTheWild(body, sentence, source) {
 }
 
 // --------------------------------------------------------------------------
+// the pending round
+// --------------------------------------------------------------------------
+
+/*
+ * Mirrors parse_pending / ANSWER_MARKER in vocab.py. A round is set on a laptop
+ * and answered on a phone, and the split is the '**A**' line: above it is the
+ * question and belongs to whoever set it, below it is the answer. This side
+ * only ever rewrites what is below — same discipline as the note editor, which
+ * only ever rewrites the body.
+ */
+const QUIZ_HEADING_RE = /^##\s+(\d+)\.\s+(.+?)\s*·\s*(compose|infer|discriminate)\s*$/i;
+const ANSWER_MARKER = "**A**";
+
+/**
+ * Split a pending round into its questions, answers and the lines between.
+ *
+ * Splits on either line ending. getFile already normalises what comes back from
+ * GitHub, but a helper that leaves a stray '\r' on every line when handed a CRLF
+ * file is a trap, and it would show up as the phone silently rewording the
+ * question it was asked.
+ */
+export function parsePending(body) {
+  const lines = String(body).split(/\r?\n/);
+  const questions = [];
+  let current = null;
+  let inAnswer = false;
+
+  lines.forEach((line, i) => {
+    const heading = QUIZ_HEADING_RE.exec(line);
+    if (heading) {
+      current = {
+        n: Number(heading[1]),
+        word: heading[2].trim(),
+        format: heading[3].toLowerCase(),
+        question: [],
+        // Where this question's answer lives, as a half open line range.
+        answerStart: -1,
+        answerEnd: -1,
+      };
+      questions.push(current);
+      inAnswer = false;
+      return;
+    }
+    if (!current) return;
+    if (line.trim() === ANSWER_MARKER) {
+      inAnswer = true;
+      current.answerStart = i + 1;
+      current.answerEnd = i + 1;
+      return;
+    }
+    if (inAnswer) current.answerEnd = i + 1;
+    else current.question.push(line);
+  });
+
+  return questions.map((q) => ({
+    n: q.n,
+    word: q.word,
+    format: q.format,
+    question: q.question.join("\n").trim(),
+    answer: q.answerStart < 0 ? "" : lines.slice(q.answerStart, q.answerEnd).join("\n").trim(),
+    answerStart: q.answerStart,
+    answerEnd: q.answerEnd,
+  }));
+}
+
+/**
+ * Rewrite only the answer slots, leaving every other byte alone.
+ *
+ * Splices from the bottom up so the earlier ranges stay valid as the line count
+ * changes underneath them.
+ */
+export function writeAnswers(body, questions, answers) {
+  const lines = String(body).split(/\r?\n/);
+  for (let i = questions.length - 1; i >= 0; i--) {
+    const q = questions[i];
+    const answer = String(answers[i] == null ? "" : answers[i]).replace(/\r\n/g, "\n").trim();
+    if (q.answerStart < 0) continue;
+    lines.splice(q.answerStart, q.answerEnd - q.answerStart, ...(answer ? answer.split("\n") : []));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Stamp `answered:` in the frontmatter.
+ *
+ * The one place the web side touches frontmatter, and deliberately: without it
+ * a rebuilt page cannot tell an unanswered round from a finished one. It writes
+ * nothing else, and never touches a note's frontmatter at all.
+ */
+export function stampAnswered(frontmatter, dayIso) {
+  if (/^answered:/m.test(frontmatter)) {
+    return frontmatter.replace(/^answered:.*$/m, `answered: ${dayIso}`);
+  }
+  return `${frontmatter.replace(/\s+$/, "")}\nanswered: ${dayIso}`;
+}
+
+// --------------------------------------------------------------------------
 // dates
 // --------------------------------------------------------------------------
 

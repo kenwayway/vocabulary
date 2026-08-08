@@ -43,14 +43,23 @@ Generate the skeleton from the template:
 python scripts/vocab.py new serendipity --pos noun --tags "literary,chance"
 ```
 
-This writes `words/serendipity.md` with today's date and an initial review
-state, so the word appears in the next quiz round. Then fill in the sections by
-hand:
+This writes `words/serendipity.md` with today's date. Two sections are worth
+filling in, and they are the two the template gives you:
 
 | Section | What goes in it |
 | --- | --- |
 | `## Definition` | An English definition in your own words, not a dictionary copy-paste |
 | `## In the wild` | The sentence where you actually met the word, with its source |
+
+**The definition is what puts the word into the review queue.** Until it says
+something, the note is a captured headword and nothing more: it stays out of
+every quiz round, and `vocab.py inbox` lists it as waiting.
+
+Everything else is depth you add when you want it — as a `## Heading` in the
+same file, whenever the mood strikes:
+
+| Section | What goes in it |
+| --- | --- |
 | `## Etymology` | Roots and affixes — learn the root and you get a family of words |
 | `## Word family` | Related forms: adjective, adverb, verb |
 | `## Synonyms & nuance` | Not a list; spell out how each one differs |
@@ -58,11 +67,16 @@ hand:
 | `## My sentences` | Your own sentences. Add one at every review |
 | `## Notes` | Memory hooks, confusions, anything else |
 
+Nothing warns you about their absence, and a note with two sections filled in
+is a real note. `vocab.py new <word> --full` lays all eight out for when you
+sit down meaning to write the whole thing.
+
 Commit and push when the note is ready; the site rebuilds automatically.
 
-From a phone, the published site does the same thing: the **+** button asks for
-the headword and the sentence you met it in, commits `words/<slug>.md`, and
-opens the editor on the body. See [Writing from the site](#writing-from-the-site).
+From a phone, the published site captures words rather than writing them: the
+**+** button asks for the headword and the sentence you met it in, commits
+`words/<slug>.md`, and stays open for the next word. Writing the note itself
+is a separate sitting. See [Writing from the site](#writing-from-the-site).
 
 Multi-word entries work too — `vocab.py new "give up"` creates
 `words/give-up.md`. The filename is derived from the headword and must keep
@@ -88,13 +102,36 @@ Open a Claude Code session and ask to be quizzed. Each round:
 Note bodies belong to the owner and are left alone by default. To have a note
 drafted, ask for it explicitly.
 
+### Answering on a phone
+
+A round does not have to be answered in the chat. Ask Claude to set one for
+later and it writes `quizzes/pending.md` and pushes; a **Quiz** tab appears on
+the site about a minute afterwards, with every question on one screen and a box
+under each. Answers commit straight back to `main`, and drafts are mirrored to
+`localStorage` so a killed tab does not lose a half-typed sentence.
+
+The split is strict: **the phone writes answers, nothing else.** Questions and
+review state are re-read at save time and carried over untouched, so a round
+cannot be reworded from the phone and a review recorded meanwhile cannot be
+undone. Grading stays at a keyboard — next session Claude reads the answers
+back, grades them in Chinese, and records the round in one step.
+
+That makes a commute usable for the part of this that actually needs doing:
+answering. `quizzes/pending.md` existing *is* the open round; closing it
+deletes the file.
+
 ## Commands
 
 ```bash
 python scripts/vocab.py new <word>              # create from the template
+python scripts/vocab.py new <word> --full       # ...with the optional sections laid out
 python scripts/vocab.py due                     # what is due today
 python scripts/vocab.py due --limit 5 --fill    # top up to five words
+python scripts/vocab.py inbox                   # captured but not yet written up
 python scripts/vocab.py review <word> --result correct|wrong
+python scripts/vocab.py quiz status             # is a round open, is it answered
+python scripts/vocab.py quiz answers            # the round as JSON, for grading
+python scripts/vocab.py quiz close <word>=correct <word>=wrong ...
 python scripts/vocab.py stats                   # totals, familiarity spread, accuracy
 python scripts/vocab.py validate                # structural check; CI runs this too
 python scripts/build_site.py                    # render site/index.html
@@ -103,11 +140,15 @@ python scripts/build_site.py                    # render site/index.html
 `validate` must exit 0 before a push. It reports genuine structural problems as
 errors — a filename that no longer matches its headword, a malformed date, an
 out-of-range level — while incomplete notes are only warnings and never block a
-build.
+build. It only asks after the two required sections; a note without an
+etymology is not incomplete, it is just a note without an etymology.
 
 ## Review schedule
 
-Familiarity runs from level 0 to 6, mapping to intervals of
+A word enters the schedule when its definition does. Before that it is a
+capture, not a flashcard, and no round will pick it — see `vocab.py inbox`.
+
+Familiarity then runs from level 0 to 6, mapping to intervals of
 **1 / 3 / 7 / 14 / 30 / 60 / 120** days. A correct answer advances one level. A
 wrong answer drops two levels and schedules the word for tomorrow.
 
@@ -124,10 +165,16 @@ hand.
 publishes on every push to `main`. Once loaded, it works offline; add it to the
 home screen for a reader that behaves like an app.
 
-- **Browse** — search across definitions and notes, filter by due date, recency,
-  weakest, or tag, and open any word for the full note.
+- **Browse** — search across definitions and notes, filter by due date, notes
+  still owed, recency, weakest, or tag, and open any word for the full note.
 - **Cards** — self-test on the English definition and a cloze-deleted example,
-  then flip for the word.
+  then flip for the word. Words with no definition sit this out; a card needs
+  something to put on its front.
+- **Quiz** — only there when a round is waiting, and only on the Cloudflare
+  build. See [Answering on a phone](#answering-on-a-phone).
+
+The header carries both backlogs: reviews due, and words still waiting for a
+note. The second one is the one that quietly grows.
 
 The card tally is per-round and deliberately not saved. Review progress is
 recorded only through the quiz flow.
@@ -141,6 +188,13 @@ Built with `--api` (which Cloudflare Pages does and the local build does not),
 the site can add words and edit note bodies. Both write straight to
 `words/*.md` on `main` through the GitHub API, so the Markdown files stay the
 only source of truth and `vocab.py` needs no changes.
+
+**Capturing and writing are separate.** The **+** form has two exits: *Add*
+saves the word and clears itself for the next one, so three words from one
+article take twenty seconds; *Add & write now* drops into the editor. Add is
+the default because the notes are easier at a keyboard, and a captured word
+waits under the **No note** filter until you get there. Being dropped into a
+markdown editor after every capture is what stops people adding words at all.
 
 **The API never touches frontmatter.** `GET /api/note/<slug>` returns the body
 alone, and `PUT` re-reads the file at save time and carries the existing
@@ -203,8 +257,9 @@ GitHub Pages can stay switched on as a read-only mirror — its build has no
 | `quizzes/YYYY-MM-DD.md` | Archive of each round: questions, answers, grading. |
 | `scripts/vocab.py` | CLI: `new` / `due` / `review` / `stats` / `validate`. |
 | `scripts/build_site.py` | Renders `words/*.md` into `site/index.html`. |
-| `functions/api/*` | The write API: create a note, read and save a body. |
-| `functions/_lib/notes.js` | Note format helpers, mirroring `vocab.py`. |
+| `quizzes/pending.md` | The one round out for answering. Absent means none. |
+| `functions/api/*` | The write API: create a note, save a body, save quiz answers. |
+| `functions/_lib/notes.js` | Note and round format helpers, mirroring `vocab.py`. |
 | `.github/workflows/pages.yml` | Structural check on push to `main`. |
 
 Nothing under `functions/` runs during a local build; it is invoked by

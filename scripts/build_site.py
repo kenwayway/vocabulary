@@ -20,7 +20,10 @@ from vocab import (
     MAX_LEVEL,
     ROOT,
     SRS_INTERVALS,
+    clean_section,
+    is_unwritten,
     load_all,
+    parse_pending,
     split_sections,
     today,
 )
@@ -156,12 +159,16 @@ def collect() -> list[dict]:
         sections = split_sections(entry["body"])
         rendered = {}
         for name, raw in sections.items():
-            cleaned = COMMENT_RE.sub("", raw).strip()
+            # clean_section, not a bare comment strip: an untouched section is
+            # a lone '>' or '-', and rendering that puts an empty blockquote or
+            # bullet on the page as though something had been written there.
+            cleaned = clean_section(raw)
             if cleaned:
                 rendered[name] = render_markdown(cleaned)
 
-        definition_raw = COMMENT_RE.sub("", sections.get("Definition", "")).strip()
-        wild_raw = COMMENT_RE.sub("", sections.get("In the wild", "")).strip()
+        definition_raw = clean_section(sections.get("Definition", ""))
+        wild_raw = clean_section(sections.get("In the wild", ""))
+        seed = is_unwritten(entry)
         srs = meta["srs"]
 
         words.append(
@@ -178,7 +185,11 @@ def collect() -> list[dict]:
                 "lastReviewed": srs["last_reviewed"].isoformat() if srs["last_reviewed"] else None,
                 "correct": srs["correct"],
                 "wrong": srs["wrong"],
-                "isDue": (ref - srs["due"]).days >= 0,
+                # A note still waiting to be written is not due for anything;
+                # showing it as due would put a word with nothing in it at the
+                # top of the list every single day.
+                "isDue": not seed and (ref - srs["due"]).days >= 0,
+                "unwritten": seed,
                 "summary": re.sub(r"\s+", " ", definition_raw).strip(),
                 "sections": rendered,
                 "sectionOrder": [n for n in sections if n in rendered],
@@ -202,6 +213,38 @@ def collect() -> list[dict]:
     return words
 
 
+def collect_pending() -> dict | None:
+    """The open round, if there is one, ready to be answered on a phone.
+
+    Questions are rendered here rather than in the browser so the phone gets the
+    same Markdown subset as the rest of the site. Answers are shipped raw: they
+    go straight back into a textarea.
+    """
+    try:
+        pending = parse_pending()
+    except Exception as exc:  # noqa: BLE001 - a broken round must not break the site
+        print(f"warning: ignoring quizzes/pending.md: {exc}")
+        return None
+    if pending is None or not pending["questions"]:
+        return None
+
+    return {
+        "round": pending["round"],
+        "asked": pending["asked"].isoformat() if pending["asked"] else None,
+        "answered": pending["answered"].isoformat() if pending["answered"] else None,
+        "questions": [
+            {
+                "n": q["n"],
+                "word": q["word"],
+                "format": q["format"],
+                "question": render_markdown(q["question"]),
+                "answer": q["answer"],
+            }
+            for q in pending["questions"]
+        ],
+    }
+
+
 def build_html(words: list[dict], api: bool = False) -> str:
     payload = {
         "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -211,6 +254,9 @@ def build_html(words: list[dict], api: bool = False) -> str:
         # Only the Cloudflare deployment serves /api/*, so the editing UI is
         # baked in there and left out of the GitHub Pages build entirely.
         "api": api,
+        # Answering writes to the repository, so a round is only offered where
+        # there is an API to write it with.
+        "pending": collect_pending() if api else None,
         "words": words,
     }
     # Guard against a note body containing a literal </script>.
@@ -341,8 +387,28 @@ input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1p
 .dot.on { background: var(--accent); }
 .badge { font-size: 11px; color: var(--due); border: 1px solid currentColor;
   border-radius: 999px; padding: 1px 7px; font-family: system-ui, sans-serif; }
+/* A note owed is a quieter obligation than a review owed. */
+.badge.soft { color: var(--muted); border-style: dashed; }
 .tag { font-size: 11px; color: var(--muted); background: var(--surface-2);
   border-radius: 999px; padding: 1px 8px; font-family: system-ui, sans-serif; }
+
+/* ---- the open round ---- */
+#quiz { padding: 4px 0 40px; }
+.q-head { font-size: 13px; color: var(--muted); font-family: system-ui, sans-serif;
+  margin: 0 0 18px; }
+.q-item { border-top: 1px solid var(--border); padding: 20px 0; }
+.q-label { font-size: 12px; color: var(--muted); font-family: system-ui, sans-serif;
+  text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px; }
+.q-item .prompt { font-size: 16px; line-height: 1.6; }
+.q-item .prompt blockquote { margin: 12px 0; padding-left: 14px;
+  border-left: 2px solid var(--border); color: var(--muted); }
+.q-item textarea {
+  width: 100%; box-sizing: border-box; margin-top: 14px; padding: 12px;
+  font: inherit; font-size: 16px; line-height: 1.55; min-height: 96px;
+  resize: vertical; border-radius: 11px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+}
+.q-item textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 .empty { text-align: center; color: var(--muted); padding: 60px 20px; font-size: 15px; }
 .empty code { background: var(--surface-2); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
@@ -421,6 +487,9 @@ a { color: var(--accent); }
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
 }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+/* A second exit that must not compete with the primary one: its own full-width
+   row below, so the label never has to wrap inside a third of a phone. */
+.btn.wide { flex-basis: 100%; font-size: 14px; color: var(--muted); }
 .tally { text-align: center; font-size: 13px; color: var(--muted);
   font-family: system-ui, sans-serif; margin-top: 14px; }
 .note { font-size: 12px; color: var(--muted); font-family: system-ui, sans-serif;
@@ -453,13 +522,16 @@ a { color: var(--accent); }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 14px; min-height: 58vh;
 }
-.form-actions { display: flex; gap: 8px; margin-top: 20px; }
+.form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
 .status {
   font-size: 13px; font-family: system-ui, sans-serif;
   margin-top: 12px; padding: 10px 12px; border-radius: 10px;
   background: var(--surface-2); color: var(--muted); line-height: 1.5;
 }
 .status.bad { color: var(--due); border: 1px solid currentColor; background: transparent; }
+/* An action offered inside a sentence, where a button would shout. */
+.linkish { font: inherit; color: var(--accent); background: none; border: 0;
+  padding: 0; cursor: pointer; text-decoration: underline; }
 .status[hidden] { display: none; }
 </style>
 </head>
@@ -476,6 +548,7 @@ a { color: var(--accent); }
       <div class="modes">
         <button id="mode-browse" aria-pressed="true">Browse</button>
         <button id="mode-cards" aria-pressed="false">Cards</button>
+        <button id="mode-quiz" aria-pressed="false" hidden>Quiz</button>
       </div>
     </div>
     <div class="chips" id="chips"></div>
@@ -483,6 +556,7 @@ a { color: var(--accent); }
 
   <div id="browse"><div class="cards" id="cards"></div></div>
   <div id="deck" class="deck" hidden></div>
+  <div id="quiz" hidden></div>
 </div>
 
 <button class="fab" id="add" hidden aria-label="Add a word">+</button>
@@ -518,7 +592,9 @@ a { color: var(--accent); }
     add: document.getElementById("add"),
     toolbar: document.getElementById("toolbar"),
     modeBrowse: document.getElementById("mode-browse"),
-    modeCards: document.getElementById("mode-cards")
+    modeCards: document.getElementById("mode-cards"),
+    modeQuiz: document.getElementById("mode-quiz"),
+    quiz: document.getElementById("quiz")
   };
 
   function esc(s) {
@@ -528,8 +604,13 @@ a { color: var(--accent); }
   }
 
   var dueCount = WORDS.filter(function (w) { return w.isDue; }).length;
+  var unwrittenCount = WORDS.filter(function (w) { return w.unwritten; }).length;
+  // Two debts, both worth seeing: reviews owed, and notes owed. Capturing a
+  // word is cheap precisely because writing it up happens later — so the
+  // backlog has to be visible or it quietly becomes the whole notebook.
   el.subtitle.innerHTML = WORDS.length + " words · " +
     (dueCount ? "<b>" + dueCount + " due for review</b>" : "nothing due today") +
+    (unwrittenCount ? " · <b>" + unwrittenCount + " waiting for a note</b>" : "") +
     " · built " + esc(DATA.generated);
 
   // ---- filters -----------------------------------------------------------
@@ -539,10 +620,13 @@ a { color: var(--accent); }
 
   var filters = [
     { id: "all", label: "All " + WORDS.length },
-    { id: "due", label: "Due " + dueCount },
+    { id: "due", label: "Due " + dueCount }
+  ].concat(
+    unwrittenCount ? [{ id: "unwritten", label: "No note " + unwrittenCount }] : []
+  ).concat([
     { id: "recent", label: "Recent" },
     { id: "weak", label: "Weakest" }
-  ].concat(tagNames.map(function (t) { return { id: "tag:" + t, label: t }; }));
+  ]).concat(tagNames.map(function (t) { return { id: "tag:" + t, label: t }; }));
 
   filters.forEach(function (f) {
     var b = document.createElement("button");
@@ -563,11 +647,16 @@ a { color: var(--accent); }
     var list = WORDS.filter(function (w) {
       if (q && w.searchBlob.indexOf(q) === -1) return false;
       if (state.filter === "due") return w.isDue;
+      if (state.filter === "unwritten") return w.unwritten;
       if (state.filter === "recent" || state.filter === "weak" || state.filter === "all") return true;
       if (state.filter.indexOf("tag:") === 0) return w.tags.indexOf(state.filter.slice(4)) !== -1;
       return true;
     });
-    if (state.filter === "recent") {
+    if (state.filter === "unwritten") {
+      // Oldest capture first: the word you met a fortnight ago is the one
+      // whose context you are about to lose.
+      list = list.slice().sort(function (a, b) { return a.added.localeCompare(b.added) || a.word.localeCompare(b.word); });
+    } else if (state.filter === "recent") {
       list = list.slice().sort(function (a, b) { return b.added.localeCompare(a.added) || a.word.localeCompare(b.word); });
     } else if (state.filter === "weak") {
       list = list.slice().sort(function (a, b) {
@@ -601,6 +690,7 @@ a { color: var(--accent); }
         (w.summary ? "<p>" + esc(w.summary) + "</p>" : '<p><em>no definition yet</em></p>') +
         '<div class="card-foot">' + dots(w.level) +
         (w.isDue ? '<span class="badge">due</span>' : "") +
+        (w.unwritten ? '<span class="badge soft">needs a note</span>' : "") +
         w.tags.map(function (t) { return '<span class="tag">' + esc(t) + "</span>"; }).join("") +
         "</div>";
       b.addEventListener("click", function () { openSheet(w); });
@@ -622,13 +712,16 @@ a { color: var(--accent); }
       '<button class="close" aria-label="Close">&times;</button></div></div>' +
       '<div class="meta-row">' + dots(w.level) +
       (w.isDue ? '<span class="badge">due</span>' : "") +
+      (w.unwritten ? '<span class="badge soft">needs a note</span>' : "") +
       (w.pos ? '<span class="tag">' + esc(w.pos) + "</span>" : "") +
       w.tags.map(function (t) { return '<span class="tag">' + esc(t) + "</span>"; }).join("") +
       "</div>" + parts +
       '<div class="stat-line">added ' + esc(w.added) +
-      " · next review " + esc(w.due) +
-      " · level " + w.level + "/" + DATA.maxLevel +
-      (w.correct + w.wrong ? " · " + w.correct + " right / " + w.wrong + " wrong" : " · never quizzed") +
+      (w.unwritten
+        ? " · out of the review queue until it has a definition"
+        : " · next review " + esc(w.due) +
+          " · level " + w.level + "/" + DATA.maxLevel +
+          (w.correct + w.wrong ? " · " + w.correct + " right / " + w.wrong + " wrong" : " · never quizzed")) +
       "</div>";
 
     el.sheetInner.querySelector(".close").addEventListener("click", closeSheet);
@@ -668,7 +761,8 @@ a { color: var(--accent); }
   }
 
   function startDeck() {
-    state.deck = shuffle(visible());
+    // A card whose front reads "no definition yet" is not a card.
+    state.deck = shuffle(visible().filter(function (w) { return !w.unwritten; }));
     state.idx = 0; state.revealed = false; state.hit = 0; state.miss = 0;
     renderDeck();
   }
@@ -686,7 +780,8 @@ a { color: var(--accent); }
   function renderDeck() {
     var total = state.deck.length;
     if (!total) {
-      el.deck.innerHTML = '<div class="empty">No words match this filter.</div>';
+      el.deck.innerHTML = '<div class="empty">Nothing to test here yet.<br><br>' +
+        "A card needs a definition to put on its front.</div>";
       return;
     }
     if (state.idx >= total) {
@@ -815,17 +910,29 @@ a { color: var(--accent); }
       field("f-ipa", "Pronunciation", "optional", "input", 'autocomplete="off"') +
       field("f-tags", "Tags", "comma separated", "input", 'autocapitalize="none" autocomplete="off"') +
       '<div class="form-actions"><button class="btn" id="f-cancel">Cancel</button>' +
-      '<button class="btn primary" id="f-save">Add</button></div>' +
+      '<button class="btn primary" id="f-save">Add</button>' +
+      '<button class="btn wide" id="f-save-write">Add and write the note now</button></div>' +
       '<div class="status" id="form-status" hidden></div>' +
-      '<div class="note">The rest of the note is written in the editor that opens next.</div>'
+      '<div class="note">Capturing the word and writing it up are separate jobs. ' +
+      "<b>Add</b> keeps this form open so you can catch several at once — the notes " +
+      "are easier at a keyboard, and they wait for you under <b>No note</b>.</div>"
     );
 
     document.getElementById("f-cancel").addEventListener("click", closeForm);
+
     var save = document.getElementById("f-save");
-    save.addEventListener("click", function () {
+    var saveWrite = document.getElementById("f-save-write");
+
+    // Two exits, because the two jobs have different rhythms. Reading an
+    // article throws three words at you and you want all three captured in
+    // twenty seconds; sitting down to write one up is a different afternoon.
+    // Dropping straight into an editor after every capture is what turned
+    // "add a word" into a chore nobody does on a phone.
+    function submit(thenWrite) {
       var word = document.getElementById("f-word").value.trim();
       if (!word) { setStatus("A headword is required.", true); return; }
       save.disabled = true;
+      saveWrite.disabled = true;
       setStatus("Saving…");
       request("/api/note", {
         method: "POST",
@@ -838,12 +945,29 @@ a { color: var(--accent); }
           tags: document.getElementById("f-tags").value
         })
       }).then(function (res) {
-        openEditor(res.slug, res.word);
+        if (thenWrite) { openEditor(res.slug, res.word); return; }
+        // Reset for the next one rather than closing: the word list is baked
+        // into this page at build time, so there is nothing to go back and
+        // look at until the site rebuilds anyway.
+        ["f-word", "f-wild", "f-source", "f-pos", "f-ipa", "f-tags"].forEach(function (id) {
+          document.getElementById(id).value = "";
+        });
+        save.disabled = false;
+        saveWrite.disabled = false;
+        setStatus(
+          "Added <b>" + esc(res.word) + "</b> — waiting for a note. " +
+          "It appears in the list once the site rebuilds. Next word?"
+        );
+        document.getElementById("f-word").focus();
       }).catch(function (err) {
         save.disabled = false;
+        saveWrite.disabled = false;
         setStatus(esc(err.message), true);
       });
-    });
+    }
+
+    save.addEventListener("click", function () { submit(false); });
+    saveWrite.addEventListener("click", function () { submit(true); });
     document.getElementById("f-word").focus();
   }
 
@@ -943,18 +1067,179 @@ a { color: var(--accent); }
     el.add.addEventListener("click", openAdd);
   }
 
+  // ---- the open round ----------------------------------------------------
+  // Every question on one screen, deliberately: a round is meant to be answered
+  // in one sitting, not drip-fed a card at a time. Grading still happens at a
+  // keyboard — nothing here judges an answer.
+  var quiz = DATA.pending;
+
+  function quizDraftKey() { return "vocab-quiz:" + (quiz ? quiz.round : ""); }
+
+  function readQuizDraft() {
+    try {
+      var raw = window.localStorage.getItem(quizDraftKey());
+      var parsed = raw ? JSON.parse(raw) : null;
+      return Array.isArray(parsed) && parsed.length === quiz.questions.length ? parsed : null;
+    } catch (e) { return null; }
+  }
+
+  function writeQuizDraft(answers) {
+    try {
+      if (answers === null) window.localStorage.removeItem(quizDraftKey());
+      else window.localStorage.setItem(quizDraftKey(), JSON.stringify(answers));
+    } catch (e) { /* private mode, or the quota is full; not worth surfacing */ }
+  }
+
+  function answerBoxes() {
+    return [].slice.call(el.quiz.querySelectorAll(".q-item textarea"));
+  }
+
+  function currentAnswers() {
+    return answerBoxes().map(function (t) { return t.value; });
+  }
+
+  function setQuizStatus(text, bad) {
+    var box = document.getElementById("quiz-status");
+    if (!box) return;
+    box.hidden = !text;
+    box.className = "status" + (bad ? " bad" : "");
+    box.innerHTML = text || "";
+  }
+
+  function renderQuiz() {
+    if (!quiz) return;
+    var draft = readQuizDraft();
+    var answered = quiz.questions.filter(function (q) { return q.answer.trim(); }).length;
+
+    var head = "Round " + esc(quiz.round) + " · asked " + esc(quiz.asked || "?") +
+      " · " + quiz.questions.length + " questions" +
+      (answered === quiz.questions.length ? " · all answered" :
+        answered ? " · " + answered + " answered" : "");
+
+    var items = quiz.questions.map(function (q, i) {
+      var value = draft ? draft[i] : q.answer;
+      return '<div class="q-item">' +
+        '<div class="q-label">' + q.n + " / " + quiz.questions.length + " · " +
+        esc(q.word) + " · " + esc(q.format) + "</div>" +
+        '<div class="prompt">' + q.question + "</div>" +
+        '<textarea rows="4" aria-label="Answer to question ' + q.n +
+        '" placeholder="Your answer, in English">' + esc(value) + "</textarea>" +
+        "</div>";
+    }).join("");
+
+    el.quiz.innerHTML =
+      '<div class="q-head">' + head + "</div>" + items +
+      '<div class="form-actions"><button class="btn primary" id="quiz-save">Save answers</button></div>' +
+      '<div class="status" id="quiz-status"' + (draft ? "" : " hidden") + ">" +
+      (draft ? "Showing an unsaved draft from this phone." : "") + "</div>" +
+      '<div class="note">Saving commits to the repository. Grading happens at a ' +
+      "keyboard afterwards — you can come back and edit an answer until then.</div>";
+
+    answerBoxes().forEach(function (box) {
+      box.addEventListener("input", function () { writeQuizDraft(currentAnswers()); });
+    });
+    document.getElementById("quiz-save").addEventListener("click", saveQuiz);
+  }
+
+  function saveQuiz() {
+    var save = document.getElementById("quiz-save");
+    var answers = currentAnswers();
+    save.disabled = true;
+    setQuizStatus("Saving…");
+
+    request("/api/quiz", {
+      method: "PUT",
+      body: JSON.stringify({ answers: answers, baseAnswersHash: quiz.answersHash })
+    }).then(function (res) {
+      quiz.answersHash = res.answersHash;
+      quiz.questions.forEach(function (q, i) { q.answer = answers[i]; });
+      writeQuizDraft(null);
+      save.disabled = false;
+      setQuizStatus(res.unchanged
+        ? "Nothing had changed since the last save."
+        : "Saved. The round is on <b>main</b> — grading happens at a keyboard.");
+    }).catch(function (err) {
+      save.disabled = false;
+      if (err.status === 409 && err.payload && err.payload.questions) {
+        // Answered from somewhere else. Nothing is discarded without asking.
+        setQuizStatus(esc(err.message) +
+          ' <button class="linkish" id="quiz-take-theirs">Load the other version</button>' +
+          " (this replaces what you typed).", true);
+        document.getElementById("quiz-take-theirs").addEventListener("click", function () {
+          quiz.questions = err.payload.questions;
+          quiz.answersHash = err.payload.answersHash;
+          writeQuizDraft(null);
+          renderQuiz();
+          setQuizStatus("Loaded the answers from the server.");
+        });
+        return;
+      }
+      setQuizStatus(esc(err.message), true);
+    });
+  }
+
+  var quizLoaded = false;
+
+  /**
+   * Fetch the live answers before offering to overwrite them.
+   *
+   * The questions come from the build — already rendered, and from the same
+   * commit that set the round. The answers and their hash have to come from the
+   * API: this page could be a minute stale, and saving against a hash baked at
+   * build time would let a stale tab clobber an answer typed since.
+   */
+  function loadQuiz() {
+    if (!quiz) return;
+    if (quizLoaded) { renderQuiz(); return; }
+
+    el.quiz.innerHTML = '<div class="empty">Loading the round…</div>';
+    request("/api/quiz").then(function (res) {
+      if (!res.pending) {
+        quiz = null;
+        el.modeQuiz.hidden = true;
+        el.quiz.innerHTML = '<div class="empty">This round has been closed.<br><br>' +
+          "Its grading is in the archive.</div>";
+        return;
+      }
+      if (res.questions.length !== quiz.questions.length) {
+        el.quiz.innerHTML = '<div class="empty">A different round is open than the one ' +
+          "this page was built with.<br><br>Reload to catch up.</div>";
+        return;
+      }
+      res.questions.forEach(function (q, i) { quiz.questions[i].answer = q.answer; });
+      quiz.answersHash = res.answersHash;
+      quizLoaded = true;
+      renderQuiz();
+    }).catch(function (err) {
+      el.quiz.innerHTML = '<div class="empty">Could not load the round.<br><br>' +
+        esc(err.message) + "</div>";
+    });
+  }
+
   // ---- modes -------------------------------------------------------------
   function setMode(mode) {
     state.mode = mode;
     el.modeBrowse.setAttribute("aria-pressed", mode === "browse");
     el.modeCards.setAttribute("aria-pressed", mode === "cards");
+    el.modeQuiz.setAttribute("aria-pressed", mode === "quiz");
     el.browse.hidden = mode !== "browse";
     el.deck.hidden = mode !== "cards";
+    el.quiz.hidden = mode !== "quiz";
+    // Filtering words is meaningless while answering a fixed set of questions.
+    el.chips.hidden = mode === "quiz";
     if (mode === "cards") startDeck();
+    if (mode === "quiz") loadQuiz();
   }
 
   el.modeBrowse.addEventListener("click", function () { setMode("browse"); });
   el.modeCards.addEventListener("click", function () { setMode("cards"); });
+  el.modeQuiz.addEventListener("click", function () { setMode("quiz"); });
+
+  if (quiz) {
+    el.modeQuiz.hidden = false;
+    var unanswered = quiz.questions.filter(function (q) { return !q.answer.trim(); }).length;
+    if (unanswered) el.modeQuiz.textContent = "Quiz " + unanswered;
+  }
 
   el.q.addEventListener("input", function () { state.query = el.q.value; render(); });
 
@@ -963,6 +1248,8 @@ a { color: var(--accent); }
   }, { passive: true });
 
   function render() {
+    // Not the quiz: re-rendering it mid-answer would throw away the textareas.
+    if (state.mode === "quiz") return;
     if (state.mode === "browse") renderCards(visible());
     else startDeck();
   }
