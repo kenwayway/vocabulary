@@ -17,9 +17,19 @@ whole point of the notebook is English-in-English.
 | `quizzes/YYYY-MM-DD.md` | Archive of each quiz round: questions, answers, grading. |
 | `scripts/vocab.py` | CLI: `new` / `due` / `review` / `stats` / `validate`. |
 | `scripts/build_site.py` | Renders `words/*.md` into a single `site/index.html`. |
-| `.github/workflows/pages.yml` | Validates and publishes the site on push to `main`. |
+| `functions/` | Cloudflare Pages Functions: the write API behind the site. |
+| `.github/workflows/pages.yml` | Runs `validate` on push to `main`. |
 
 Run everything from the repo root. The only dependency is PyYAML.
+
+**The owner can add and edit notes from their phone**, through the published
+site. Those commits land on `main` directly. So: `git pull` before starting a
+quiz round or you will grade a stale copy and push a conflicting `srs` block.
+
+The web editor only ever writes the note *body* — it re-reads the file at save
+time and carries the existing frontmatter over untouched. That is deliberate,
+and it is what stops a phone editor from clobbering a review you just recorded.
+Keep it that way if you touch `functions/`.
 
 ## Writing notes — read this before you touch `words/`
 

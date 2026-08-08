@@ -1,32 +1,30 @@
-name: Build and deploy site
+name: Validate notes
+
+# Publishing moved to Cloudflare Pages, which builds this repository itself and
+# serves the write API alongside the site. This workflow is only the structural
+# check — it must stay green, because a note committed from the phone lands on
+# main without ever passing through anyone's laptop.
 
 on:
   push:
     branches: [main]
     paths:
       - 'words/**'
-      - 'scripts/**'
       - 'templates/**'
+      - 'scripts/**'
       - '.github/workflows/pages.yml'
   pull_request:
     paths:
       - 'words/**'
-      - 'scripts/**'
       - 'templates/**'
+      - 'scripts/**'
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-# Let a running deploy finish rather than cancelling it mid-publish.
-concurrency:
-  group: pages
-  cancel-in-progress: false
 
 jobs:
-  build:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +40,7 @@ jobs:
         run: python scripts/vocab.py validate
 
       - name: Build site
+        # Not deployed from here; this only proves the build still works.
         run: python scripts/build_site.py
 
       - name: Summary
@@ -51,19 +50,3 @@ jobs:
             python scripts/vocab.py stats
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: actions/upload-pages-artifact@v3
-        if: github.event_name != 'pull_request'
-        with:
-          path: site
-
-  deploy:
-    needs: build
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4

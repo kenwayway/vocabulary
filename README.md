@@ -60,6 +60,10 @@ hand:
 
 Commit and push when the note is ready; the site rebuilds automatically.
 
+From a phone, the published site does the same thing: the **+** button asks for
+the headword and the sentence you met it in, commits `words/<slug>.md`, and
+opens the editor on the body. See [Writing from the site](#writing-from-the-site).
+
 Multi-word entries work too — `vocab.py new "give up"` creates
 `words/give-up.md`. The filename is derived from the headword and must keep
 matching it, so rename entries through the `word:` field rather than by moving
@@ -116,7 +120,7 @@ hand.
 ## The site
 
 `scripts/build_site.py` renders every note into a single self-contained
-`site/index.html` — data inlined, no external requests — which GitHub Actions
+`site/index.html` — data inlined, no external requests — which Cloudflare Pages
 publishes on every push to `main`. Once loaded, it works offline; add it to the
 home screen for a reader that behaves like an app.
 
@@ -131,6 +135,65 @@ recorded only through the quiz flow.
 `site/` is a build artifact and is gitignored; CI regenerates it. Never commit
 it.
 
+## Writing from the site
+
+Built with `--api` (which Cloudflare Pages does and the local build does not),
+the site can add words and edit note bodies. Both write straight to
+`words/*.md` on `main` through the GitHub API, so the Markdown files stay the
+only source of truth and `vocab.py` needs no changes.
+
+**The API never touches frontmatter.** `GET /api/note/<slug>` returns the body
+alone, and `PUT` re-reads the file at save time and carries the existing
+frontmatter over untouched. This is what keeps the review state safe: an
+editor opened at breakfast and saved at lunch cannot undo a `vocab.py review`
+that landed in between, because the two writers never touch the same bytes.
+Conflicts are detected on a hash of the body only, so a review landing mid-edit
+is not reported as one.
+
+If the body *did* change elsewhere, the save is refused and you choose: keep
+what you typed, or load the other version. Nothing is discarded silently. Work
+in progress is also mirrored to `localStorage`, so a phone killing the tab does
+not lose the paragraph you were halfway through.
+
+Saving commits to `main`; the site rebuilds and the new text appears about a
+minute later.
+
+### Deploying it
+
+1. **Cloudflare Pages → Create → Connect to Git**, pick this repository.
+   - Build command: `pip install pyyaml && python scripts/vocab.py validate && python scripts/build_site.py --api`
+   - Build output directory: `site`
+   - Environment variable: `PYTHON_VERSION` = `3.12`
+2. **Lock it down before adding the token.** Zero Trust → Access → Applications
+   → Self-hosted, covering the whole site. Add a policy allowing your own email
+   only, and copy the **Application Audience (AUD) tag**.
+3. **Create a GitHub token yourself** — fine-grained, this repository only,
+   *Contents: Read and write*, and nothing else. Do not paste it anywhere but
+   the Cloudflare dashboard.
+4. **Settings → Variables and Secrets**, all in Production:
+
+   | Name | Kind | Value |
+   | --- | --- | --- |
+   | `GITHUB_TOKEN` | Secret | the token from step 3 |
+   | `GITHUB_REPO` | Text | `kenwayway/vocabulary` |
+   | `GITHUB_BRANCH` | Text | `main` |
+   | `CF_ACCESS_TEAM_DOMAIN` | Text | `<team>.cloudflareaccess.com` |
+   | `CF_ACCESS_AUD` | Text | the AUD tag from step 2 |
+   | `ALLOWED_EMAILS` | Text | your email |
+   | `TIMEZONE` | Text | `Asia/Shanghai` |
+
+Access is verified by the Function itself, not just at the edge, and with
+`CF_ACCESS_TEAM_DOMAIN` or `CF_ACCESS_AUD` missing the API refuses every
+request. A misconfiguration makes writing stop working; it does not make the
+repository writable by strangers.
+
+`TIMEZONE` decides what `added:` says. A Worker runs in UTC, so without it a
+word added before 08:00 in Shanghai would be filed under the previous day and
+come up due a day early.
+
+GitHub Pages can stay switched on as a read-only mirror — its build has no
+`--api`, so it shows no editing UI.
+
 ## Repository layout
 
 | Path | Contents |
@@ -140,16 +203,23 @@ it.
 | `quizzes/YYYY-MM-DD.md` | Archive of each round: questions, answers, grading. |
 | `scripts/vocab.py` | CLI: `new` / `due` / `review` / `stats` / `validate`. |
 | `scripts/build_site.py` | Renders `words/*.md` into `site/index.html`. |
-| `.github/workflows/pages.yml` | Validates and publishes on push to `main`. |
+| `functions/api/*` | The write API: create a note, read and save a body. |
+| `functions/_lib/notes.js` | Note format helpers, mirroring `vocab.py`. |
+| `.github/workflows/pages.yml` | Structural check on push to `main`. |
+
+Nothing under `functions/` runs during a local build; it is invoked by
+Cloudflare Pages, and only for `/api/*` (`site/_routes.json` keeps every other
+request on static assets).
 
 ## Setup
 
-Publishing requires the repository to be public:
+Deployment and the write API are covered in
+[Writing from the site](#writing-from-the-site). To keep the GitHub Pages
+mirror as well, the repository must be public:
 
 1. `Settings → General → Danger Zone → Change visibility` → **Public**
 2. `Settings → Pages → Source` → **GitHub Actions**
 
 The second step matters. With the source left on *Deploy from a branch*, GitHub
 serves the repository root through its built-in Jekyll builder and publishes
-`README.md` as the home page — the build workflow runs, but nothing it produces
-is ever deployed.
+`README.md` as the home page.

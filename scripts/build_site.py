@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import html
 import json
+import os
 import re
 from pathlib import Path
 
@@ -151,6 +152,7 @@ def collect() -> list[dict]:
     words = []
     for entry in load_all():
         meta = entry["meta"]
+        slug = entry["path"].stem
         sections = split_sections(entry["body"])
         rendered = {}
         for name, raw in sections.items():
@@ -165,6 +167,8 @@ def collect() -> list[dict]:
         words.append(
             {
                 "word": str(meta["word"]),
+                # The editor addresses notes by filename, not by headword.
+                "slug": slug,
                 "pos": str(meta.get("pos") or ""),
                 "pronunciation": str(meta.get("pronunciation") or ""),
                 "tags": [str(t) for t in meta["tags"]],
@@ -198,12 +202,15 @@ def collect() -> list[dict]:
     return words
 
 
-def build_html(words: list[dict]) -> str:
+def build_html(words: list[dict], api: bool = False) -> str:
     payload = {
         "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "today": today().isoformat(),
         "intervals": SRS_INTERVALS,
         "maxLevel": MAX_LEVEL,
+        # Only the Cloudflare deployment serves /api/*, so the editing UI is
+        # baked in there and left out of the GitHub Pages build entirely.
+        "api": api,
         "words": words,
     }
     # Guard against a note body containing a literal </script>.
@@ -418,6 +425,42 @@ a { color: var(--accent); }
   font-family: system-ui, sans-serif; margin-top: 14px; }
 .note { font-size: 12px; color: var(--muted); font-family: system-ui, sans-serif;
   text-align: center; margin-top: 8px; line-height: 1.5; }
+
+/* ---- writing ---- */
+.fab {
+  position: fixed; right: 18px; z-index: 30;
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  width: 54px; height: 54px; border-radius: 50%;
+  border: 0; background: var(--accent); color: var(--bg);
+  font-size: 30px; line-height: 1; cursor: pointer;
+  box-shadow: 0 4px 16px rgba(31,27,22,.28);
+}
+.field { margin: 14px 0; }
+.field label {
+  display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--accent); font-family: system-ui, sans-serif; font-weight: 600; margin-bottom: 5px;
+}
+.field .hint { text-transform: none; letter-spacing: 0; color: var(--muted); font-weight: 400; }
+.field input, .field textarea {
+  width: 100%; font: inherit; font-size: 16px;
+  padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  -webkit-appearance: none;
+}
+.field textarea { resize: vertical; line-height: 1.55; }
+.field input:focus, .field textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+#editor-body {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px; min-height: 58vh;
+}
+.form-actions { display: flex; gap: 8px; margin-top: 20px; }
+.status {
+  font-size: 13px; font-family: system-ui, sans-serif;
+  margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+  background: var(--surface-2); color: var(--muted); line-height: 1.5;
+}
+.status.bad { color: var(--due); border: 1px solid currentColor; background: transparent; }
+.status[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -442,8 +485,14 @@ a { color: var(--accent); }
   <div id="deck" class="deck" hidden></div>
 </div>
 
+<button class="fab" id="add" hidden aria-label="Add a word">+</button>
+
 <div class="sheet" id="sheet" role="dialog" aria-modal="true">
   <div class="sheet-inner" id="sheet-inner"></div>
+</div>
+
+<div class="sheet" id="form-sheet" role="dialog" aria-modal="true">
+  <div class="sheet-inner" id="form-inner"></div>
 </div>
 
 <script id="data" type="application/json">__DATA__</script>
@@ -464,6 +513,9 @@ a { color: var(--accent); }
     deck: document.getElementById("deck"),
     sheet: document.getElementById("sheet"),
     sheetInner: document.getElementById("sheet-inner"),
+    formSheet: document.getElementById("form-sheet"),
+    formInner: document.getElementById("form-inner"),
+    add: document.getElementById("add"),
     toolbar: document.getElementById("toolbar"),
     modeBrowse: document.getElementById("mode-browse"),
     modeCards: document.getElementById("mode-cards")
@@ -565,7 +617,9 @@ a { color: var(--accent); }
     el.sheetInner.innerHTML =
       '<div class="sheet-bar"><div><h2>' + esc(w.word) + "</h2>" +
       (w.pronunciation ? '<div class="ipa">' + esc(w.pronunciation) + "</div>" : "") +
-      '</div><button class="close" aria-label="Close">&times;</button></div>' +
+      "</div><div class=\"row\">" +
+      (DATA.api ? '<button class="chip" id="edit-note">Edit</button>' : "") +
+      '<button class="close" aria-label="Close">&times;</button></div></div>' +
       '<div class="meta-row">' + dots(w.level) +
       (w.isDue ? '<span class="badge">due</span>' : "") +
       (w.pos ? '<span class="tag">' + esc(w.pos) + "</span>" : "") +
@@ -578,6 +632,8 @@ a { color: var(--accent); }
       "</div>";
 
     el.sheetInner.querySelector(".close").addEventListener("click", closeSheet);
+    var edit = document.getElementById("edit-note");
+    if (edit) edit.addEventListener("click", function () { openEditor(w.slug, w.word); });
     el.sheet.classList.add("open");
     el.sheetInner.scrollTop = 0;
     document.body.style.overflow = "hidden";
@@ -590,8 +646,13 @@ a { color: var(--accent); }
 
   el.sheet.addEventListener("click", function (e) { if (e.target === el.sheet) closeSheet(); });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") closeSheet();
-    if (state.mode === "cards" && !el.sheet.classList.contains("open")) {
+    var editing = el.formSheet.classList.contains("open");
+    if (e.key === "Escape") {
+      // Close the topmost layer only.
+      if (editing) closeForm(); else closeSheet();
+      return;
+    }
+    if (state.mode === "cards" && !editing && !el.sheet.classList.contains("open")) {
       if (e.key === " " || e.key === "Enter") { e.preventDefault(); flashPrimary(); }
     }
   });
@@ -675,6 +736,213 @@ a { color: var(--accent); }
     el.deck.querySelector(".flash-body").addEventListener("click", function () { openSheet(w); });
   }
 
+  // ---- writing -----------------------------------------------------------
+  // Present only on the Cloudflare deployment, where /api/* is served by a
+  // Function that commits to the repository. The static build has DATA.api
+  // false and none of this is reachable.
+
+  function request(path, options) {
+    return fetch(path, Object.assign({
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin"
+    }, options || {})).then(function (res) {
+      var type = res.headers.get("Content-Type") || "";
+      var expired = "Your session expired. Reload the page to sign in again.";
+
+      // An expired Access session is answered with the login page, not with an
+      // error status. Anything that is not JSON means we never reached the
+      // Function, so it must never be read as a successful empty response.
+      if (type.indexOf("application/json") === -1) {
+        throw Object.assign(new Error(expired), { status: res.status, payload: {} });
+      }
+
+      return res.json().catch(function () { return {}; }).then(function (payload) {
+        if (res.ok) return payload;
+        var message = payload.error ||
+          (res.status === 401 || res.status === 403
+            ? expired
+            : "Could not reach the server (" + res.status + ").");
+        throw Object.assign(new Error(message), { status: res.status, payload: payload });
+      });
+    });
+  }
+
+  function openForm(html) {
+    el.formInner.innerHTML = html;
+    el.formInner.querySelector(".close").addEventListener("click", closeForm);
+    el.formSheet.classList.add("open");
+    el.formInner.scrollTop = 0;
+    document.body.style.overflow = "hidden";
+  }
+
+  function closeForm() {
+    el.formSheet.classList.remove("open");
+    // The detail sheet may still be underneath.
+    if (!el.sheet.classList.contains("open")) document.body.style.overflow = "";
+  }
+
+  el.formSheet.addEventListener("click", function (e) { if (e.target === el.formSheet) closeForm(); });
+
+  function setStatus(text, bad) {
+    var box = document.getElementById("form-status");
+    if (!box) return;
+    box.hidden = !text;
+    box.className = "status" + (bad ? " bad" : "");
+    box.innerHTML = text || "";
+  }
+
+  function bar(title) {
+    return '<div class="sheet-bar"><div><h2>' + esc(title) + "</h2></div>" +
+      '<button class="close" aria-label="Close">&times;</button></div>';
+  }
+
+  function field(id, label, hint, tag, attrs) {
+    return '<div class="field"><label for="' + id + '">' + esc(label) +
+      (hint ? ' <span class="hint">' + esc(hint) + "</span>" : "") + "</label>" +
+      (tag === "textarea"
+        ? '<textarea id="' + id + '" ' + (attrs || "") + "></textarea>"
+        : '<input id="' + id + '" ' + (attrs || "") + ">") + "</div>";
+  }
+
+  // ---- add ---------------------------------------------------------------
+  function openAdd() {
+    openForm(
+      bar("New word") +
+      field("f-word", "Headword", "", "input", 'autocapitalize="none" autocomplete="off"') +
+      field("f-wild", "In the wild", "the sentence you met it in", "textarea", 'rows="3"') +
+      field("f-source", "Source", "where it came from", "input", 'autocomplete="off"') +
+      field("f-pos", "Part of speech", "optional", "input", 'autocomplete="off"') +
+      field("f-ipa", "Pronunciation", "optional", "input", 'autocomplete="off"') +
+      field("f-tags", "Tags", "comma separated", "input", 'autocapitalize="none" autocomplete="off"') +
+      '<div class="form-actions"><button class="btn" id="f-cancel">Cancel</button>' +
+      '<button class="btn primary" id="f-save">Add</button></div>' +
+      '<div class="status" id="form-status" hidden></div>' +
+      '<div class="note">The rest of the note is written in the editor that opens next.</div>'
+    );
+
+    document.getElementById("f-cancel").addEventListener("click", closeForm);
+    var save = document.getElementById("f-save");
+    save.addEventListener("click", function () {
+      var word = document.getElementById("f-word").value.trim();
+      if (!word) { setStatus("A headword is required.", true); return; }
+      save.disabled = true;
+      setStatus("Saving…");
+      request("/api/note", {
+        method: "POST",
+        body: JSON.stringify({
+          word: word,
+          wild: document.getElementById("f-wild").value,
+          source: document.getElementById("f-source").value,
+          pos: document.getElementById("f-pos").value,
+          pronunciation: document.getElementById("f-ipa").value,
+          tags: document.getElementById("f-tags").value
+        })
+      }).then(function (res) {
+        openEditor(res.slug, res.word);
+      }).catch(function (err) {
+        save.disabled = false;
+        setStatus(esc(err.message), true);
+      });
+    });
+    document.getElementById("f-word").focus();
+  }
+
+  // ---- edit --------------------------------------------------------------
+  // Drafts survive the phone killing the tab mid-sentence.
+  function draftKey(slug) { return "vocab-draft:" + slug; }
+
+  function readDraft(slug) {
+    try { return window.localStorage.getItem(draftKey(slug)); } catch (e) { return null; }
+  }
+
+  function writeDraft(slug, text) {
+    try {
+      if (text === null) window.localStorage.removeItem(draftKey(slug));
+      else window.localStorage.setItem(draftKey(slug), text);
+    } catch (e) { /* private mode, or the quota is full; not worth surfacing */ }
+  }
+
+  function openEditor(slug, word) {
+    openForm(bar(word || slug) + '<div class="status" id="form-status">Loading…</div>');
+
+    request("/api/note/" + encodeURIComponent(slug)).then(function (note) {
+      var base = note.bodyHash;
+      openForm(
+        bar(note.word || slug) +
+        field("editor-body", "Note", "Markdown, ## headings", "textarea",
+          'spellcheck="false" autocapitalize="sentences"') +
+        '<div class="form-actions"><button class="btn" id="e-cancel">Close</button>' +
+        '<button class="btn primary" id="e-save">Save</button></div>' +
+        '<div class="status" id="form-status" hidden></div>' +
+        '<div class="note">Saved straight to the repository. The page here updates ' +
+        "after the rebuild, about a minute later.</div>"
+      );
+
+      var box = document.getElementById("editor-body");
+      box.value = note.body;
+
+      var draft = readDraft(slug);
+      if (draft !== null && draft !== note.body) {
+        setStatus('An unsaved draft from this device is different from what is on the ' +
+          'server. <button class="chip" id="e-draft">Restore the draft</button>');
+        document.getElementById("e-draft").addEventListener("click", function () {
+          box.value = draft;
+          setStatus("Draft restored. It is not saved until you press Save.");
+        });
+      }
+
+      box.addEventListener("input", function () { writeDraft(slug, box.value); });
+      document.getElementById("e-cancel").addEventListener("click", closeForm);
+
+      var save = document.getElementById("e-save");
+      function commit(hash) {
+        save.disabled = true;
+        setStatus("Saving…");
+        request("/api/note/" + encodeURIComponent(slug), {
+          method: "PUT",
+          body: JSON.stringify({ body: box.value, baseBodyHash: hash })
+        }).then(function (res) {
+          base = res.bodyHash;
+          save.disabled = false;
+          writeDraft(slug, null);
+          setStatus(res.unchanged
+            ? "Nothing had changed."
+            : "Saved. It shows up here after the rebuild.");
+        }).catch(function (err) {
+          save.disabled = false;
+          if (err.status === 409 && err.payload && err.payload.conflict) {
+            // Keep their text in the box either way; nothing is thrown away
+            // without them pressing something.
+            setStatus("This note changed elsewhere since you opened it. " +
+              '<button class="chip" id="e-force">Keep mine</button> ' +
+              '<button class="chip" id="e-theirs">Use the other version</button>', true);
+            var theirs = err.payload.body;
+            var theirHash = err.payload.bodyHash;
+            document.getElementById("e-force").addEventListener("click", function () {
+              commit(theirHash);
+            });
+            document.getElementById("e-theirs").addEventListener("click", function () {
+              box.value = theirs;
+              base = theirHash;
+              writeDraft(slug, null);
+              setStatus("Loaded the other version.");
+            });
+            return;
+          }
+          setStatus(esc(err.message), true);
+        });
+      }
+      save.addEventListener("click", function () { commit(base); });
+    }).catch(function (err) {
+      setStatus(esc(err.message), true);
+    });
+  }
+
+  if (DATA.api) {
+    el.add.hidden = false;
+    el.add.addEventListener("click", openAdd);
+  }
+
   // ---- modes -------------------------------------------------------------
   function setMode(mode) {
     state.mode = mode;
@@ -712,16 +980,30 @@ def main() -> int:
     parser.add_argument(
         "--out", default=str(OUTPUT_DIR), help="output directory (default: site/)"
     )
+    parser.add_argument(
+        "--api",
+        action="store_true",
+        default=os.environ.get("VOCAB_API") == "1",
+        help="include the add/edit UI (Cloudflare deployment only; env VOCAB_API=1)",
+    )
     args = parser.parse_args()
 
     words = collect()
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "index.html"
-    out_file.write_text(build_html(words), encoding="utf-8")
+    out_file.write_text(build_html(words, api=args.api), encoding="utf-8")
+
+    # Keep static assets away from the Functions runtime; without this every
+    # request for the page would be billed and delayed by a Worker invocation.
+    (out_dir / "_routes.json").write_text(
+        json.dumps({"version": 1, "include": ["/api/*"], "exclude": []}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     size_kb = out_file.stat().st_size / 1024
-    print(f"wrote {out_file} — {len(words)} word(s), {size_kb:.1f} KB")
+    mode = "with editing" if args.api else "read only"
+    print(f"wrote {out_file} — {len(words)} word(s), {size_kb:.1f} KB, {mode}")
     return 0
 
 
