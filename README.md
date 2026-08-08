@@ -1,82 +1,155 @@
 # Vocabulary
 
-生词笔记本。每个词一个 Markdown 文件，Git 存历史，网页在手机上翻阅，
-Claude 负责出题、批改和记录复习进度。
+A personal English vocabulary notebook. Each word is a single Markdown file
+tracked in Git, scheduled for review by a small Python CLI, and published as a
+static site that reads well on a phone.
 
-📖 **[打开笔记网页](https://kenwayway.github.io/vocabulary/)**
+[![Build and deploy site](https://github.com/kenwayway/vocabulary/actions/workflows/pages.yml/badge.svg)](https://github.com/kenwayway/vocabulary/actions/workflows/pages.yml)
+
+📖 **[Read the notebook](https://kenwayway.github.io/vocabulary/)**
 
 ---
 
-## 加一个新词
+## How it works
+
+The system has three parts, and only the first one is authoritative:
+
+1. **The notes.** `words/<slug>.md` — one file per headword. YAML frontmatter
+   holds the structured fields and the spaced-repetition state; the body holds
+   notes written by hand.
+2. **The CLI.** `scripts/vocab.py` creates notes from a template, reports what
+   is due, records review outcomes, and validates the collection.
+3. **Claude.** Runs the quiz rounds: selects words, asks questions, grades the
+   answers, writes the results back, and archives each round.
+
+Everything else — the published site, the review schedule, the statistics — is
+derived from the Markdown files. Nothing is stored anywhere else.
+
+## Requirements
+
+Python 3.9 or later (CI runs 3.12) and a single dependency:
+
+```bash
+pip install pyyaml
+```
+
+Run all commands from the repository root.
+
+## Adding a word
+
+Generate the skeleton from the template:
 
 ```bash
 python scripts/vocab.py new serendipity --pos noun --tags "literary,chance"
 ```
 
-这会从 `templates/word.md` 生成 `words/serendipity.md`，填好日期和初始复习状态。
-接下来打开文件，把各个小节填上：
+This writes `words/serendipity.md` with today's date and an initial review
+state, so the word appears in the next quiz round. Then fill in the sections by
+hand:
 
-| 小节 | 写什么 |
+| Section | What goes in it |
 | --- | --- |
-| `## Definition` | 英文释义，尽量用自己的话，别抄词典 |
-| `## In the wild` | **你真正遇到它的那句原文**，以及出处 |
-| `## Etymology` | 词根词缀、同源词 —— 记住根，一串词就都记住了 |
-| `## Word family` | 同族词：形容词、副词、动词形式 |
-| `## Synonyms & nuance` | 不只是列举，要写清**差别在哪** |
-| `## Collocations` | 它习惯搭配的词 |
-| `## My sentences` | 你自己造的句子，每次复习都往里加一句 |
-| `## Notes` | 记忆钩子、易混点 |
+| `## Definition` | An English definition in your own words, not a dictionary copy-paste |
+| `## In the wild` | The sentence where you actually met the word, with its source |
+| `## Etymology` | Roots and affixes — learn the root and you get a family of words |
+| `## Word family` | Related forms: adjective, adverb, verb |
+| `## Synonyms & nuance` | Not a list; spell out how each one differs |
+| `## Collocations` | The words it habitually travels with |
+| `## My sentences` | Your own sentences. Add one at every review |
+| `## Notes` | Memory hooks, confusions, anything else |
 
-填完 commit + push，网页几分钟后自动更新。
+Commit and push when the note is ready; the site rebuilds automatically.
 
-`words/` 里的 `serendipity`、`equivocate`、`tenuous` 是示例，展示笔记该写到什么程度。
-不需要的话直接删掉即可。
+Multi-word entries work too — `vocab.py new "give up"` creates
+`words/give-up.md`. The filename is derived from the headword and must keep
+matching it, so rename entries through the `word:` field rather than by moving
+files.
 
-## 让 Claude 考你
+`serendipity`, `equivocate` and `tenuous` ship as worked examples of the
+intended depth. Delete them once they have served their purpose.
 
-开一个 Claude Code 会话，说「考我」就行。它会：
+## Reviewing
 
-1. 从到期的词里挑 5 个（不够就用最久没复习的补上）
-2. 出三种题：**自己造句** / **语境推义**（它造句、你解释）/ **近义词辨析**
-3. 逐题用中文点评，指出搭配、语域、词义偏差
-4. 把结果写回每个词的复习状态，并归档到 `quizzes/YYYY-MM-DD.md`
+Open a Claude Code session and ask to be quizzed. Each round:
 
-每天渥太华时间 12:30 会自动推一套题到你手机。
+1. Selects five words that are due, topping up with the least recently
+   reviewed ones when fewer than five have come up.
+2. Asks three kinds of question — **compose a sentence**, **infer the meaning
+   from context**, and **discriminate between near synonyms**.
+3. Grades each answer in Chinese, naming the specific problem: a wrong
+   collocation, a register mismatch, a meaning that drifted.
+4. Writes the outcome back into each word's review state and archives the
+   round in `quizzes/YYYY-MM-DD.md`.
 
-想让它帮你写笔记内容，明确说「帮我补全这个词」—— 默认它不会动你手写的正文。
+Note bodies belong to the owner and are left alone by default. To have a note
+drafted, ask for it explicitly.
 
-## 命令
+## Commands
 
 ```bash
-python scripts/vocab.py new <word>              # 从模板新建
-python scripts/vocab.py due                     # 今天该复习哪些
-python scripts/vocab.py due --limit 5 --fill    # 不够 5 个就补齐
+python scripts/vocab.py new <word>              # create from the template
+python scripts/vocab.py due                     # what is due today
+python scripts/vocab.py due --limit 5 --fill    # top up to five words
 python scripts/vocab.py review <word> --result correct|wrong
-python scripts/vocab.py stats                   # 总量、熟悉度分布、正确率
-python scripts/vocab.py validate                # 检查所有文件（CI 也跑这个）
-python scripts/build_site.py                    # 生成 site/index.html
+python scripts/vocab.py stats                   # totals, familiarity spread, accuracy
+python scripts/vocab.py validate                # structural check; CI runs this too
+python scripts/build_site.py                    # render site/index.html
 ```
 
-唯一依赖是 PyYAML：`pip install pyyaml`
+`validate` must exit 0 before a push. It reports genuine structural problems as
+errors — a filename that no longer matches its headword, a malformed date, an
+out-of-range level — while incomplete notes are only warnings and never block a
+build.
 
-## 复习节奏
+## Review schedule
 
-熟悉度 0–6 级，对应间隔 **1 / 3 / 7 / 14 / 30 / 60 / 120** 天。
-答对升一级，答错降两级并且明天再考。半对算错 —— 这才是间隔重复需要的信号。
+Familiarity runs from level 0 to 6, mapping to intervals of
+**1 / 3 / 7 / 14 / 30 / 60 / 120** days. A correct answer advances one level. A
+wrong answer drops two levels and schedules the word for tomorrow.
 
-## 网页
+Partial answers count as wrong. Half-remembering is precisely the signal the
+scheduler needs, and grading it generously quietly breaks the spacing.
 
-`site/index.html` 是单个自包含文件（数据内联，无外部请求），推送到 `main`
-后由 GitHub Actions 自动构建发布。手机上「添加到主屏幕」之后离线也能看。
+The `srs` block is maintained by `vocab.py review` and should not be edited by
+hand.
 
-- **Browse** —— 搜索、按 due / 最近 / 最不熟 / 标签筛选，点开看完整笔记
-- **Cards** —— 翻卡自测：只给英文释义和挖空的原文例句，翻面看词
+## The site
 
-翻卡模式的计分只在本轮有效、不会保存 —— 真正的复习进度由 Claude 出题时写入。
+`scripts/build_site.py` renders every note into a single self-contained
+`site/index.html` — data inlined, no external requests — which GitHub Actions
+publishes on every push to `main`. Once loaded, it works offline; add it to the
+home screen for a reader that behaves like an app.
 
-## 首次配置
+- **Browse** — search across definitions and notes, filter by due date, recency,
+  weakest, or tag, and open any word for the full note.
+- **Cards** — self-test on the English definition and a cloze-deleted example,
+  then flip for the word.
 
-网页需要仓库是 public：
+The card tally is per-round and deliberately not saved. Review progress is
+recorded only through the quiz flow.
 
-1. `Settings → General → Danger Zone → Change visibility` → Public
-2. `Settings → Pages → Source` → 选 **GitHub Actions**
+`site/` is a build artifact and is gitignored; CI regenerates it. Never commit
+it.
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `words/<slug>.md` | One note per headword. The only source of truth. |
+| `templates/word.md` | The blank skeleton `vocab.py new` copies. |
+| `quizzes/YYYY-MM-DD.md` | Archive of each round: questions, answers, grading. |
+| `scripts/vocab.py` | CLI: `new` / `due` / `review` / `stats` / `validate`. |
+| `scripts/build_site.py` | Renders `words/*.md` into `site/index.html`. |
+| `.github/workflows/pages.yml` | Validates and publishes on push to `main`. |
+
+## Setup
+
+Publishing requires the repository to be public:
+
+1. `Settings → General → Danger Zone → Change visibility` → **Public**
+2. `Settings → Pages → Source` → **GitHub Actions**
+
+The second step matters. With the source left on *Deploy from a branch*, GitHub
+serves the repository root through its built-in Jekyll builder and publishes
+`README.md` as the home page — the build workflow runs, but nothing it produces
+is ever deployed.
