@@ -1,0 +1,9 @@
+# Build output — CI regenerates this on every push.
+site/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.DS_Store
