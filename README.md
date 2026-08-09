@@ -218,23 +218,25 @@ minute later.
    - Build command: `pip install pyyaml && python scripts/vocab.py validate && python scripts/build_site.py --api`
    - Build output directory: `site`
    - Environment variable: `PYTHON_VERSION` = `3.12`
-2. **Lock it down before adding the token.** Zero Trust → Access → Applications
-   → Self-hosted, covering the whole site. Add a policy allowing your own email
-   only, and copy the **Application Audience (AUD) tag**.
-3. **Create a GitHub token yourself** — fine-grained, this repository only,
+2. Add `english.sopoi.com` under **Custom domains**. The DNS zone and Pages
+   project must live in the same Cloudflare account so Access can protect it.
+3. **Lock it down before adding the token.** Zero Trust → Access → Applications
+   → Self-hosted, covering `english.sopoi.com`. Add a policy allowing your own
+   email only, and copy the **Application Audience (AUD) tag**.
+4. **Create a GitHub token yourself** — fine-grained, this repository only,
    *Contents: Read and write*, and nothing else. Do not paste it anywhere but
    the Cloudflare dashboard.
-4. **Settings → Variables and Secrets**, all in Production:
+5. **Settings → Variables and Secrets**, all in Production:
 
    | Name | Kind | Value |
    | --- | --- | --- |
-   | `GITHUB_TOKEN` | Secret | the token from step 3 |
+   | `GITHUB_TOKEN` | Secret | the token from step 4 |
    | `GITHUB_REPO` | Text | `kenwayway/vocabulary` |
    | `GITHUB_BRANCH` | Text | `main` |
    | `CF_ACCESS_TEAM_DOMAIN` | Text | `<team>.cloudflareaccess.com` |
-   | `CF_ACCESS_AUD` | Text | the AUD tag from step 2 |
+   | `CF_ACCESS_AUD` | Text | the AUD tag from step 3 |
    | `ALLOWED_EMAILS` | Text | your email |
-   | `TIMEZONE` | Text | `Asia/Shanghai` |
+   | `TIMEZONE` | Text | `America/Toronto` |
 
 Access is verified by the Function itself, not just at the edge, and with
 `CF_ACCESS_TEAM_DOMAIN` or `CF_ACCESS_AUD` missing the API refuses every
@@ -242,8 +244,8 @@ request. A misconfiguration makes writing stop working; it does not make the
 repository writable by strangers.
 
 `TIMEZONE` decides what `added:` says. A Worker runs in UTC, so without it a
-word added before 08:00 in Shanghai would be filed under the previous day and
-come up due a day early.
+word added in the evening in Toronto could be filed under the following day
+and come up due a day late.
 
 GitHub Pages can stay switched on as a read-only mirror — its build has no
 `--api`, so it shows no editing UI.
@@ -258,13 +260,15 @@ GitHub Pages can stay switched on as a read-only mirror — its build has no
 | `scripts/vocab.py` | CLI: `new` / `due` / `review` / `stats` / `validate`. |
 | `scripts/build_site.py` | Renders `words/*.md` into `site/index.html`. |
 | `quizzes/pending.md` | The one round out for answering. Absent means none. |
+| `functions/_middleware.js` | Redirects unprotected `*.pages.dev` URLs to the Access-protected custom domain. |
 | `functions/api/*` | The write API: create a note, save a body, save quiz answers. |
 | `functions/_lib/notes.js` | Note and round format helpers, mirroring `vocab.py`. |
 | `.github/workflows/pages.yml` | Structural check on push to `main`. |
 
 Nothing under `functions/` runs during a local build; it is invoked by
-Cloudflare Pages, and only for `/api/*` (`site/_routes.json` keeps every other
-request on static assets).
+Cloudflare Pages. `site/_routes.json` sends every request through a small
+hostname guard so `*.pages.dev` cannot bypass Access; only `/api/*` does any
+additional dynamic work.
 
 ## Setup
 

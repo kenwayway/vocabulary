@@ -1281,10 +1281,11 @@ def main() -> int:
     out_file = out_dir / "index.html"
     out_file.write_text(build_html(words, api=args.api), encoding="utf-8")
 
-    # Keep static assets away from the Functions runtime; without this every
-    # request for the page would be billed and delayed by a Worker invocation.
+    # Send every request through a tiny hostname guard. It redirects the
+    # unprotected *.pages.dev hostname to the Access-protected custom domain
+    # before static assets are served; only /api/* does further dynamic work.
     (out_dir / "_routes.json").write_text(
-        json.dumps({"version": 1, "include": ["/api/*"], "exclude": []}, indent=2) + "\n",
+        json.dumps({"version": 1, "include": ["/*"], "exclude": []}, indent=2) + "\n",
         encoding="utf-8",
     )
 
